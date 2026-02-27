@@ -37,6 +37,22 @@ DEFAULT_RUBBERBAND_WINDOW_LONG = True
 DEFAULT_RUBBERBAND_SMOOTHING = True
 CROSSFADE_MS = 5
 
+# Rubberband's --pitchmap implies realtime mode (-R), which introduces a
+# processing lead: per-frame pitch shifts are applied earlier than the
+# specified sample frame.  For rapidly varying corrections (vibrato
+# smoothing) this causes phase errors that can exaggerate rather than
+# reduce pitch variation.  We measure the exact lead for each sample rate
+# on first use and compensate by shifting every pitch-map frame forward.
+_rubberband_lead_cache = {}  # sr -> lead_samples
+
+# Pitch-map target resolution for smoothed clusters.  The analysis hop
+# (DEFAULT_TIME_RESOLUTION_MS) is typically 20 ms which gives only ~10
+# points per vibrato cycle at 5 Hz.  Rubberband linearly interpolates
+# between entries, so a coarser grid under-corrects at higher smoothing
+# percentages.  We upsample the per-frame shifts with cubic
+# interpolation to this finer grid so rubberband can follow the curve.
+PITCHMAP_HOP_MS = 5
+
 
 # ============================================
 # MUSIC THEORY HELPERS
@@ -462,7 +478,12 @@ def _compute_smoothed_frames(cluster, sr):
             # of pitch_shift_semitones so it never pulls toward the chromatic reference.
             deviation_semitones = 12.0 * np.log2(f / mean_freq)
             smoothed_deviation = deviation_semitones * (1.0 - smoothing)
-            frame_shift = smoothed_deviation + base_shift
+            # The shift rubberband must apply to the original frequency f:
+            #   target = mean_freq * 2^((smoothed_deviation + base_shift) / 12)
+            #   f * 2^(frame_shift / 12) = target
+            #   => frame_shift = (smoothed_deviation - deviation_semitones) + base_shift
+            #                  = -deviation_semitones * smoothing + base_shift
+            frame_shift = (smoothed_deviation - deviation_semitones) + base_shift
             raw.append((frame, frame_shift))
 
     if not raw:
@@ -570,6 +591,17 @@ def generate_pitch_map(clusters, sr, audio_length, gap_threshold_ms=None):
 
         if smoothing > 0:
             frames = _compute_smoothed_frames(cluster, sr)
+            # Upsample to finer grid so rubberband's linear interpolation
+            # can accurately follow the correction curve.
+            if len(frames) >= 2:
+                src_frames = np.array([f for f, _ in frames], dtype=float)
+                src_shifts = np.array([s for _, s in frames], dtype=float)
+                fine_hop = int(PITCHMAP_HOP_MS / 1000.0 * sr)
+                fine_frames = np.arange(
+                    int(src_frames[0]), int(src_frames[-1]) + 1, fine_hop
+                )
+                fine_shifts = np.interp(fine_frames, src_frames, src_shifts)
+                frames = list(zip(fine_frames.astype(int), fine_shifts))
             print(
                 f"[DEBUG] generate_pitch_map: note={cluster.get('note')} smoothing={smoothing} "
                 f"frames={len(frames)}"
@@ -643,24 +675,114 @@ def get_audio_mono(audio):
         return audio.mean(axis=1)
 
 
+def _build_rubberband_cmd(rb_params):
+    """Build the rubberband command list (without pitchmap/input/output args)."""
+    if rb_params is None:
+        rb_params = {}
+    command = rb_params.get("command", DEFAULT_RUBBERBAND_COMMAND)
+    cmd = [command]
+    if rb_params.get("formant", DEFAULT_RUBBERBAND_FORMANT):
+        cmd.append("--formant")
+    cmd.extend(["--crisp", str(rb_params.get("crisp", DEFAULT_RUBBERBAND_CRISP))])
+    if rb_params.get("pitch_hq", DEFAULT_RUBBERBAND_PITCH_HQ):
+        cmd.append("--pitch-hq")
+    if rb_params.get("window_long", DEFAULT_RUBBERBAND_WINDOW_LONG):
+        cmd.append("--window-long")
+    if rb_params.get("smoothing", DEFAULT_RUBBERBAND_SMOOTHING):
+        cmd.append("--smoothing")
+    return cmd
+
+
+def _measure_rubberband_lead(sr, rb_params=None):
+    """
+    Measure the exact RT-mode processing lead for a given sample rate by
+    running rubberband on a short test signal with a sharp step in the
+    pitch map and detecting where the step actually lands in the output.
+    The result is cached per sample rate.
+    """
+    if sr in _rubberband_lead_cache:
+        return _rubberband_lead_cache[sr]
+
+    sr = int(sr)
+    duration_s = 0.5
+    n_samples = int(duration_s * sr)
+    step_frame = n_samples // 2  # step at midpoint
+    shift_st = 3.0
+
+    # Synthesise a pure tone
+    t = np.arange(n_samples) / sr
+    audio = (0.5 * np.sin(2 * np.pi * 247.0 * t)).astype(np.float32)
+
+    work_dir = os.path.join(tempfile.gettempdir(), "vocal_editor")
+    os.makedirs(work_dir, exist_ok=True)
+    in_path = os.path.join(work_dir, "lead_test_in.wav")
+    out_path = os.path.join(work_dir, "lead_test_out.wav")
+    pm_path = os.path.join(work_dir, "lead_test_pm.txt")
+
+    sf.write(in_path, audio, sr)
+    with open(pm_path, "w") as f:
+        f.write(f"0 0.0\n")
+        f.write(f"{step_frame - 1} 0.0\n")
+        f.write(f"{step_frame} {shift_st}\n")
+        f.write(f"{n_samples - 1} {shift_st}\n")
+
+    cmd = _build_rubberband_cmd(rb_params)
+    cmd.extend(["--pitchmap", pm_path, in_path, out_path])
+    subprocess.run(cmd, capture_output=True, text=True)
+
+    # Detect where the step actually occurs in the output via Parselmouth
+    snd = parselmouth.Sound(out_path)
+    pitch = snd.to_pitch(time_step=0.001, pitch_floor=75, pitch_ceiling=600)
+    half_target = 247.0 * 2 ** (shift_st / 2 / 12)  # 50 % of step
+    step_time = step_frame / sr
+
+    lead_samples = 0
+    for probe in np.arange(step_time * 0.5, step_time * 1.2, 0.001):
+        f_val = pitch.get_value_at_time(probe)
+        if f_val and f_val > half_target:
+            lead_samples = int((step_time - probe) * sr)
+            break
+
+    # Clean up
+    for p in (in_path, out_path, pm_path):
+        if os.path.exists(p):
+            os.remove(p)
+
+    lead_samples = max(lead_samples, 0)
+    _rubberband_lead_cache[sr] = lead_samples
+    print(
+        f"[INFO] Measured rubberband RT lead for sr={sr}: "
+        f"{lead_samples} samples ({lead_samples / sr * 1000:.1f} ms)"
+    )
+    return lead_samples
+
+
 def run_rubberband(audio_mono, sr, pitch_map, output_path, rb_params=None):
     if rb_params is None:
         rb_params = {}
-
-    command = rb_params.get("command", DEFAULT_RUBBERBAND_COMMAND)
 
     pitch_map_file = os.path.join(
         tempfile.gettempdir(), "vocal_editor", "last_pitch_map.txt"
     )
     os.makedirs(os.path.dirname(pitch_map_file), exist_ok=True)
+
+    # Compensate for rubberband RT-mode processing lead: shift every
+    # pitch-map frame forward so the corrections land at the right time.
+    lead_samples = _measure_rubberband_lead(sr, rb_params)
+    compensated = [(frame + lead_samples, s) for frame, s in pitch_map]
+    # Ensure the file still starts at frame 0 with no shift.
+    compensated = [(0, 0.0)] + compensated
+
     with open(pitch_map_file, "w") as f:
-        for frame, semitones in pitch_map:
+        for frame, semitones in compensated:
             f.write(f"{frame} {semitones}\n")
 
     print(f"[DEBUG] pitch_map saved to: {pitch_map_file}")
-    print(f"[DEBUG] pitch_map ({len(pitch_map)} entries):")
-    for frame, semitones in pitch_map:
+    print(f"[DEBUG] pitch_map ({len(pitch_map)} entries, lead={lead_samples} samples):")
+    for frame, semitones in pitch_map[:20]:
         print(f"  {frame} {semitones:.6f}")
+    if len(pitch_map) > 20:
+        print(f"  ... ({len(pitch_map) - 20} more entries)")
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         temp_input = f.name
@@ -668,16 +790,7 @@ def run_rubberband(audio_mono, sr, pitch_map, output_path, rb_params=None):
     sf.write(temp_input, audio_mono, int(sr))
 
     try:
-        cmd = [command]
-        if rb_params.get("formant", DEFAULT_RUBBERBAND_FORMANT):
-            cmd.append("--formant")
-        cmd.extend(["--crisp", str(rb_params.get("crisp", DEFAULT_RUBBERBAND_CRISP))])
-        if rb_params.get("pitch_hq", DEFAULT_RUBBERBAND_PITCH_HQ):
-            cmd.append("--pitch-hq")
-        if rb_params.get("window_long", DEFAULT_RUBBERBAND_WINDOW_LONG):
-            cmd.append("--window-long")
-        if rb_params.get("smoothing", DEFAULT_RUBBERBAND_SMOOTHING):
-            cmd.append("--smoothing")
+        cmd = _build_rubberband_cmd(rb_params)
         cmd.extend(["--pitchmap", pitch_map_file, temp_input, str(output_path)])
 
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -692,31 +805,19 @@ def run_rubberband(audio_mono, sr, pitch_map, output_path, rb_params=None):
                 os.remove(f)
 
 
-def process_full_audio(
-    audio,
-    sr,
-    clusters,
-    params,
-    output_path,
-    original_times=None,
-    original_freqs=None,
-    corrected_freqs=None,
-):
-    """Process entire audio file with all corrections."""
+def process_full_audio(audio, sr, clusters, params, output_path):
+    """Process entire audio file with all corrections.
+
+    The pitch map is always computed server-side from the cluster parameters
+    and the original analysis frequencies stored in each cluster.  This avoids
+    precision loss from client round-trips and keeps the server as the single
+    source of truth.
+    """
     audio_mono = get_audio_mono(audio)
     audio_length = len(audio_mono)
 
-    if (
-        original_times is not None
-        and original_freqs is not None
-        and corrected_freqs is not None
-    ):
-        pitch_map = generate_pitch_map_from_frames(
-            original_times, original_freqs, corrected_freqs, sr, audio_length
-        )
-    else:
-        gap_threshold = params.get("gap_threshold_ms", DEFAULT_GAP_THRESHOLD_MS)
-        pitch_map = generate_pitch_map(clusters, sr, audio_length, gap_threshold)
+    gap_threshold = params.get("gap_threshold_ms", DEFAULT_GAP_THRESHOLD_MS)
+    pitch_map = generate_pitch_map(clusters, sr, audio_length, gap_threshold)
 
     rb_params = params.get("rb", {})
     success, msg = run_rubberband(audio_mono, sr, pitch_map, output_path, rb_params)

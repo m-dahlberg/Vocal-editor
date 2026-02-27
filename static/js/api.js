@@ -61,11 +61,11 @@ const API = {
     return r.json();
   },
 
-  async syncClusters(clusters, originalTimes, originalFreqs, correctedFreqs) {
+  async syncClusters(clusters) {
     const r = await fetch('/api/sync_clusters', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clusters, original_times: originalTimes, original_freqs: originalFreqs, corrected_freqs: correctedFreqs }),
+      body: JSON.stringify({ clusters }),
     });
     return r.json();
   },

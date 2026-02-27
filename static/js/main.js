@@ -425,52 +425,10 @@ const App = (() => {
         manually_edited:       c.manually_edited || false,
       }));
 
-      // Build full-length corrected frequency array matching the client visualization.
-      // The server uses these directly to compute per-frame rubberband shifts.
-      const originalTimes  = _state.originalTimes;
-      const originalFreqs  = _state.originalFrequencies;
-
-      // Find smoothed clusters for debug summary
-      const smoothedClusters = _state.clusters.filter(c => c.smoothing_percent > 0);
-      console.log(`[DEBUG] processDirtyClusters: ${_state.clusters.length} clusters, ${smoothedClusters.length} with smoothing`);
-      smoothedClusters.forEach(c => {
-        console.log(`[DEBUG]   smoothed cluster: ${c.note} ${c.start_time.toFixed(3)}-${c.end_time.toFixed(3)}s smoothing=${c.smoothing_percent.toFixed(1)}% shift=${c.pitch_shift_semitones.toFixed(3)} mean_freq=${c.mean_freq.toFixed(2)}Hz`);
-      });
-
-      const correctedFreqs = originalTimes.map((t, i) => {
-        const origF = originalFreqs[i];
-        if (origF === null || isNaN(origF)) return null;
-
-        const shift   = computeShiftAtTime(t);
-        const shiftedF = origF * Math.pow(2, shift / 12);
-
-        const owningCluster = _state.clusters.find(c => t >= c.start_time && t <= c.end_time);
-        if (owningCluster && owningCluster.smoothing_percent > 0) {
-          const smoothing          = owningCluster.smoothing_percent / 100;
-          const deviationSemitones = 12 * Math.log2(origF / owningCluster.mean_freq);
-          const smoothedDeviation  = deviationSemitones * (1 - smoothing);
-          const correctionShift    = owningCluster.pitch_shift_semitones;
-          const result             = owningCluster.mean_freq * Math.pow(2, (smoothedDeviation + correctionShift) / 12);
-          console.log(`[DEBUG] t=${t.toFixed(3)}s owning=${owningCluster.note} origF=${origF.toFixed(2)} dev=${deviationSemitones.toFixed(4)} smoothedDev=${smoothedDeviation.toFixed(4)} corrShift=${correctionShift.toFixed(4)} result=${result.toFixed(2)}`);
-          return result;
-        }
-        return shiftedF;
-      });
-
-      // Debug: compare _state.frequencies vs correctedFreqs for smoothed clusters
-      smoothedClusters.forEach(c => {
-        console.log(`[DEBUG] _state.frequencies vs correctedFreqs for ${c.note} ${c.start_time.toFixed(3)}-${c.end_time.toFixed(3)}s:`);
-        for (let i = 0; i < _state.times.length; i++) {
-          const t = _state.times[i];
-          if (t < c.start_time || t > c.end_time) continue;
-          const stateF     = _state.frequencies[i];
-          const origIdx    = originalTimes.findIndex(ot => Math.abs(ot - t) < 0.001);
-          const correctedF = origIdx >= 0 ? correctedFreqs[origIdx] : null;
-          console.log(`[DEBUG]   t=${t.toFixed(3)}s stateF=${stateF ? stateF.toFixed(2) : 'null'} correctedF=${correctedF ? correctedF.toFixed(2) : 'null'}`);
-        }
-      });
-
-      const result = await API.syncClusters(clusterUpdates, originalTimes, originalFreqs, correctedFreqs);
+      // Pitch map is computed entirely server-side from cluster parameters
+      // and the original analysis frequencies.  The client pitch preview is
+      // a visual aid, not a source of truth.
+      const result = await API.syncClusters(clusterUpdates);
 
       if (result.error) {
         log(`Error: ${result.error}`, 'error');

@@ -259,27 +259,14 @@ def sync_clusters():
 
     SESSION['clusters'] = new_clusters
 
-    # Receive pre-computed corrected frequencies from the client visualization
-    original_times  = data.get('original_times')
-    original_freqs  = data.get('original_freqs')
-    corrected_freqs = data.get('corrected_freqs')
-
-    # Debug: print corrected_freqs around the smoothed cluster (3.73-4.09s)
-    if original_times and corrected_freqs:
-        print(f"[DEBUG] corrected_freqs received: {len(corrected_freqs)} frames")
-        for i, (t, cf) in enumerate(zip(original_times, corrected_freqs)):
-            if t is not None and 3.70 <= t <= 4.10:
-                of = original_freqs[i] if original_freqs else None
-                print(f"[DEBUG] t={t:.3f}s orig={of:.2f} corrected={cf:.2f}" if cf and of else f"[DEBUG] t={t:.3f}s orig={of} corrected={cf}")
-
+    # Pitch map is computed entirely server-side from cluster parameters
+    # and the original analysis frequencies stored in each cluster.
+    # The client pitch preview is a visual aid, not a source of truth.
     try:
         success, msg = process_full_audio(
             SESSION['audio'], SESSION['sr'],
             SESSION['clusters'], SESSION['params'],
             SESSION['corrected_path'],
-            original_times=original_times,
-            original_freqs=original_freqs,
-            corrected_freqs=corrected_freqs,
         )
 
         if not success:
