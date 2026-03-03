@@ -368,133 +368,290 @@ const App = (() => {
 
   // ---- CALCULATE PITCH CURVE ----
 
+  // Find the maximum available ramp space before/after a cluster by checking ALL clusters.
+  // Returns { spaceBefore, spaceAfter } in seconds.
+  function _getRampSpace(cluster) {
+    const allClusters = _state.clusters;
+    let spaceBefore = cluster.start_time;  // default: from time 0
+    let spaceAfter = Infinity;
+    for (const other of allClusters) {
+      if (other === cluster) continue;
+      // Nearest cluster ending before this one starts
+      if (other.end_time <= cluster.start_time) {
+        const gap = cluster.start_time - other.end_time;
+        if (gap < spaceBefore) spaceBefore = gap;
+      }
+      // Nearest cluster starting after this one ends
+      if (other.start_time >= cluster.end_time) {
+        const gap = other.start_time - cluster.end_time;
+        if (gap < spaceAfter) spaceAfter = gap;
+      }
+    }
+    return { spaceBefore, spaceAfter };
+  }
+
+  // Calculate intrusion of clusterA's ramp-out into clusterA when transitioning to clusterB.
+  function _getIntrusionOutForCluster(clusterA, clusterB) {
+    if (!clusterA || !clusterB) return 0;
+    const gap = clusterB.start_time - clusterA.end_time;
+    if (gap <= 0) return 0;
+    const rampOutA = (clusterA.ramp_out_ms || 50) / 1000.0;
+    const rampInB  = (clusterB.ramp_in_ms  || 50) / 1000.0;
+    const desired = rampOutA + rampInB;
+    if (gap >= desired) return 0;
+    const shortfall = desired - gap;
+    const halfA = (clusterA.end_time - clusterA.start_time) / 2;
+    return Math.min(shortfall / 2, halfA);
+  }
+
+  // Calculate intrusion of clusterB's ramp-in into clusterB when transitioning from clusterA.
+  function _getIntrusionInForCluster(clusterA, clusterB) {
+    if (!clusterA || !clusterB) return 0;
+    const gap = clusterB.start_time - clusterA.end_time;
+    if (gap <= 0) return 0;
+    const rampOutA = (clusterA.ramp_out_ms || 50) / 1000.0;
+    const rampInB  = (clusterB.ramp_in_ms  || 50) / 1000.0;
+    const desired = rampOutA + rampInB;
+    if (gap >= desired) return 0;
+    const shortfall = desired - gap;
+    const halfB = (clusterB.end_time - clusterB.start_time) / 2;
+    return Math.min(shortfall / 2, halfB);
+  }
+
   // Direct JS mirror of audio_engine.py::generate_pitch_map.
   // Returns the semitone shift that rubberband will apply at time t (in seconds),
   // using the same corrected-only filter, gap threshold, and ramp logic as the server.
   // This ensures the preview and the processed audio are calculated identically.
   function computeShiftAtTime(t) {
-    const gapThresholdMs = parseFloat(document.getElementById('p_gap_threshold_ms').value) || 150;
-
-    // Mirror server: only clusters with a non-zero shift enter the pitch map.
-    const corrected = _state.clusters.filter(c => c.pitch_shift_semitones !== 0);
+    // Mirror server: only clusters with a non-zero shift or smoothing enter the pitch map.
+    const corrected = _state.clusters.filter(c => c.pitch_shift_semitones !== 0 || (c.smoothing_percent || 0) !== 0);
     if (corrected.length === 0) return 0;
 
     for (let i = 0; i < corrected.length; i++) {
-      const c             = corrected[i];
-      let halfRampInS   = (c.ramp_in_ms  || c.transition_ramp_ms || 100) / 2000.0;
-      let halfRampOutS  = (c.ramp_out_ms || c.transition_ramp_ms || 100) / 2000.0;
-      // Clamp ramps so they never overlap inside the cluster
-      const clusterDurS = c.end_time - c.start_time;
-      if (halfRampInS + halfRampOutS > clusterDurS && clusterDurS > 0) {
-        const scale = clusterDurS / (halfRampInS + halfRampOutS);
-        halfRampInS  *= scale;
-        halfRampOutS *= scale;
+      const c = corrected[i];
+      const rampInS  = (c.ramp_in_ms  || 50) / 1000.0;
+      const rampOutS = (c.ramp_out_ms || 50) / 1000.0;
+
+      const prev = i > 0 ? corrected[i - 1] : null;
+      const nxt  = i < corrected.length - 1 ? corrected[i + 1] : null;
+
+      // Clamp ramps to not overlap ANY cluster (including uncorrected)
+      const { spaceBefore, spaceAfter } = _getRampSpace(c);
+      let effRampInS  = Math.min(rampInS, spaceBefore);
+      let effRampOutS = Math.min(rampOutS, spaceAfter);
+
+      // Handle gap overlap between adjacent CORRECTED clusters
+      const gapPrevS = prev ? (c.start_time - prev.end_time) : Infinity;
+      const gapNextS = nxt  ? (nxt.start_time - c.end_time)  : Infinity;
+      const clusterDuration = c.end_time - c.start_time;
+      const clusterHalfS = clusterDuration / 2;
+
+      let gapOverlapsPrev = false;
+      let intrusionInS = 0;
+      if (prev !== null) {
+        const prevRampOutS = (prev.ramp_out_ms || 50) / 1000.0;
+        const desiredTransition = prevRampOutS + rampInS;
+        if (gapPrevS <= 0) {
+          effRampInS = 0;
+          gapOverlapsPrev = true;
+        } else if (gapPrevS < desiredTransition) {
+          gapOverlapsPrev = true;
+          effRampInS = 0;
+          const shortfall = desiredTransition - gapPrevS;
+          intrusionInS = Math.min(shortfall / 2, clusterHalfS);
+        }
       }
-      const prev      = i > 0 ? corrected[i - 1] : null;
-      const nxt       = i < corrected.length - 1 ? corrected[i + 1] : null;
 
-      const gapPrevMs = prev ? (c.start_time - prev.end_time) * 1000 : Infinity;
-      const gapNextMs = nxt  ? (nxt.start_time - c.end_time)  * 1000 : Infinity;
+      let gapOverlapsNext = false;
+      let intrusionOutS = 0;
+      if (nxt !== null) {
+        const nxtRampInS = (nxt.ramp_in_ms || 50) / 1000.0;
+        const desiredTransition = rampOutS + nxtRampInS;
+        if (gapNextS <= 0) {
+          effRampOutS = 0;
+          gapOverlapsNext = true;
+        } else if (gapNextS < desiredTransition) {
+          gapOverlapsNext = true;
+          effRampOutS = 0;
+          const shortfall = desiredTransition - gapNextS;
+          intrusionOutS = Math.min(shortfall / 2, clusterHalfS);
+        }
+      }
 
-      const rampInStart  = c.start_time - halfRampInS;
-      const rampInEnd    = c.start_time + halfRampInS;
-      const rampOutStart = c.end_time   - halfRampOutS;
-      const rampOutEnd   = c.end_time   + halfRampOutS;
+      const adjustedStart = c.start_time + intrusionInS;
+      const adjustedEnd   = c.end_time   - intrusionOutS;
 
-      // Skip clusters whose ramp zone doesn't cover t.
+      const rampInStart = gapOverlapsPrev
+        ? (prev ? prev.end_time - _getIntrusionOutForCluster(prev, c) : c.start_time)
+        : c.start_time - effRampInS;
+      const rampOutEnd  = gapOverlapsNext
+        ? (nxt ? nxt.start_time + _getIntrusionInForCluster(c, nxt) : c.end_time)
+        : c.end_time + effRampOutS;
+
+      // Skip clusters whose zone doesn't cover t.
       if (t < rampInStart || t > rampOutEnd) continue;
 
-      if (t >= rampInEnd && t <= rampOutStart) {
-        // Interior of cluster: full shift.
+      // Interior of cluster (non-intruded zone): full shift.
+      if (t >= adjustedStart && t <= adjustedEnd) {
         return c.pitch_shift_semitones;
       }
 
-      if (t >= rampInStart && t < rampInEnd) {
-        // Ramp in: blend from previous note's shift (if close) or 0.
-        const fromShift = (gapPrevMs < gapThresholdMs && prev)
-          ? prev.pitch_shift_semitones : 0;
-        const progress = (t - rampInStart) / (rampInEnd - rampInStart);
-        return fromShift + (c.pitch_shift_semitones - fromShift) * progress;
+      // Intrusion zone at start: transition from prev's shift to this shift
+      if (gapOverlapsPrev && intrusionInS > 0 && t >= c.start_time && t < adjustedStart) {
+        const fromShift = prev ? prev.pitch_shift_semitones : 0;
+        const totalTransition = gapPrevS + intrusionInS + _getIntrusionOutForCluster(prev, c);
+        const transitionStart = prev ? prev.end_time - _getIntrusionOutForCluster(prev, c) : c.start_time;
+        const progress = (t - transitionStart) / totalTransition;
+        return fromShift + (c.pitch_shift_semitones - fromShift) * Math.max(0, Math.min(1, progress));
       }
 
-      if (t > rampOutStart && t <= rampOutEnd) {
-        // Ramp out: blend to next note's shift (if close) or 0.
-        const toShift = (gapNextMs < gapThresholdMs && nxt)
-          ? nxt.pitch_shift_semitones : 0;
-        const progress = (t - rampOutStart) / (rampOutEnd - rampOutStart);
-        return c.pitch_shift_semitones + (toShift - c.pitch_shift_semitones) * progress;
+      // Intrusion zone at end: transition from this shift to next's shift
+      if (gapOverlapsNext && intrusionOutS > 0 && t > adjustedEnd && t <= c.end_time) {
+        const toShift = nxt ? nxt.pitch_shift_semitones : 0;
+        const totalTransition = intrusionOutS + gapNextS + _getIntrusionInForCluster(c, nxt);
+        const progress = (t - adjustedEnd) / totalTransition;
+        return c.pitch_shift_semitones + (toShift - c.pitch_shift_semitones) * Math.max(0, Math.min(1, progress));
+      }
+
+      // Ramp in (outside cluster): blend to base_shift at cluster start.
+      if (t >= rampInStart && t < c.start_time) {
+        const fromShift = (prev && gapOverlapsPrev) ? prev.pitch_shift_semitones : 0;
+        const totalRamp = gapOverlapsPrev
+          ? gapPrevS + intrusionInS + _getIntrusionOutForCluster(prev, c)
+          : effRampInS;
+        if (totalRamp <= 0) return c.pitch_shift_semitones;
+        const transitionStart = gapOverlapsPrev && prev
+          ? prev.end_time - _getIntrusionOutForCluster(prev, c)
+          : rampInStart;
+        const progress = (t - transitionStart) / totalRamp;
+        return fromShift + (c.pitch_shift_semitones - fromShift) * Math.max(0, Math.min(1, progress));
+      }
+
+      // Ramp out (outside cluster): blend from base_shift at cluster end.
+      if (t > c.end_time && t <= rampOutEnd) {
+        const toShift = (nxt && gapOverlapsNext) ? nxt.pitch_shift_semitones : 0;
+        const totalRamp = gapOverlapsNext
+          ? intrusionOutS + gapNextS + _getIntrusionInForCluster(c, nxt)
+          : effRampOutS;
+        if (totalRamp <= 0) return c.pitch_shift_semitones;
+        const progress = (t - adjustedEnd) / totalRamp;
+        return c.pitch_shift_semitones + (toShift - c.pitch_shift_semitones) * Math.max(0, Math.min(1, progress));
       }
     }
 
     return 0; // t is between clusters, outside all ramp zones.
   }
 
-  // Generate correction curve: a continuous orange line connecting all corrected
-  // clusters.  Between adjacent clusters the ramp-out and ramp-in lines meet
-  // at a single midpoint centered in both time and pitch (average of the two
-  // target frequencies).  No horizontal gap segments — the lines slope directly
-  // from rampOutStart through the midpoint to the next rampInEnd.
+  // Generate correction curve: shows cents of correction relative to zero.
+  // Ramps happen entirely outside clusters; interior is flat at correction value.
+  // When gap is large enough: ramp to 0, break, ramp from 0.
+  // When gap is too small for full ramps: direct line from A's correction to B's.
   function generateCorrectionCurve() {
-    const allClusters = _state.clusters;
+    const corrected = _state.clusters.filter(c =>
+      c.pitch_shift_semitones !== 0 || (c.smoothing_percent || 0) !== 0
+    );
 
-    if (allClusters.length === 0) {
+    if (corrected.length === 0) {
       PitchPlot.updateCorrectionCurve([], []);
       return;
     }
 
     const times = [];
-    const freqs = [];
+    const cents = [];
 
-    // Pre-compute target frequencies for all clusters
-    const targets = allClusters.map(c =>
-      c.mean_freq * Math.pow(2, c.pitch_shift_semitones / 12)
-    );
+    for (let i = 0; i < corrected.length; i++) {
+      const c = corrected[i];
+      const corrCents = c.pitch_shift_semitones * 100;
+      const rampInS  = (c.ramp_in_ms  || 50) / 1000.0;
+      const rampOutS = (c.ramp_out_ms || 50) / 1000.0;
 
-    for (let i = 0; i < allClusters.length; i++) {
-      const c = allClusters[i];
+      const prev = i > 0 ? corrected[i - 1] : null;
+      const nxt  = i < corrected.length - 1 ? corrected[i + 1] : null;
 
-      let halfRampInS  = (c.ramp_in_ms  || c.transition_ramp_ms || 100) / 2000.0;
-      let halfRampOutS = (c.ramp_out_ms || c.transition_ramp_ms || 100) / 2000.0;
-      // Clamp ramps so they never overlap inside the cluster
-      const dur = c.end_time - c.start_time;
-      if (halfRampInS + halfRampOutS > dur && dur > 0) {
-        const scale = dur / (halfRampInS + halfRampOutS);
-        halfRampInS  *= scale;
-        halfRampOutS *= scale;
+      // Clamp ramps to not overlap ANY cluster (including uncorrected)
+      const { spaceBefore, spaceAfter } = _getRampSpace(c);
+      const clampedRampInS  = Math.min(rampInS, spaceBefore);
+      const clampedRampOutS = Math.min(rampOutS, spaceAfter);
+
+      const gapPrevS = prev ? (c.start_time - prev.end_time) : Infinity;
+      const gapNextS = nxt  ? (nxt.start_time - c.end_time)  : Infinity;
+      const clusterHalfS = (c.end_time - c.start_time) / 2;
+
+      // Determine if gap is too small for full ramps (overlap case).
+      let gapOverlapsPrev = false;
+      let intrusionInS = 0;
+      if (prev !== null) {
+        const prevRampOutS = (prev.ramp_out_ms || 50) / 1000.0;
+        const desiredTransition = prevRampOutS + rampInS;
+        if (gapPrevS <= 0) {
+          gapOverlapsPrev = true;
+        } else if (gapPrevS < desiredTransition) {
+          gapOverlapsPrev = true;
+          const shortfall = desiredTransition - gapPrevS;
+          intrusionInS = Math.min(shortfall / 2, clusterHalfS);
+        }
       }
 
-      const targetFreq   = targets[i];
-      const rampInEnd    = c.start_time + halfRampInS;
-      const rampOutStart = c.end_time   - halfRampOutS;
+      let gapOverlapsNext = false;
+      let intrusionOutS = 0;
+      if (nxt !== null) {
+        const nxtRampInS = (nxt.ramp_in_ms || 50) / 1000.0;
+        const desiredTransition = rampOutS + nxtRampInS;
+        if (gapNextS <= 0) {
+          gapOverlapsNext = true;
+        } else if (gapNextS < desiredTransition) {
+          gapOverlapsNext = true;
+          const shortfall = desiredTransition - gapNextS;
+          intrusionOutS = Math.min(shortfall / 2, clusterHalfS);
+        }
+      }
 
-      // --- Leading edge (first cluster only) ---
-      if (i === 0) {
+      const adjustedStart = c.start_time + intrusionInS;
+      const adjustedEnd   = c.end_time   - intrusionOutS;
+
+      // --- Ramp in ---
+      // When gap overlaps with intrusion: prev's ramp-out already emitted the
+      // transition start; we emit (adjustedStart, corrCents) so the line extends
+      // into the cluster maintaining the full transition time.
+      // When no overlap: emit ramp from 0 to corrCents before cluster start.
+      if (!gapOverlapsPrev) {
+        const rampInStart = c.start_time - clampedRampInS;
+        times.push(rampInStart);
+        cents.push(0);
+        // Cluster start
         times.push(c.start_time);
-        freqs.push(c.mean_freq);
-      }
-      // For i > 0: the midpoint was already emitted by the previous iteration
-
-      // Ramp in end → flat interior → ramp out start
-      times.push(rampInEnd);
-      freqs.push(targetFreq);
-      times.push(rampOutStart);
-      freqs.push(targetFreq);
-
-      // --- Midpoint to next cluster, or trailing edge ---
-      if (i < allClusters.length - 1) {
-        // Midpoint: centered in time and pitch between this and next target
-        const midTime = (c.end_time + allClusters[i + 1].start_time) / 2;
-        const midFreq = (targetFreq + targets[i + 1]) / 2;
-        times.push(midTime);
-        freqs.push(midFreq);
+        cents.push(corrCents);
       } else {
-        // Last cluster: end at cluster edge at mean_freq
-        times.push(c.end_time);
-        freqs.push(c.mean_freq);
+        // Overlap: transition ends at adjustedStart inside the cluster
+        times.push(adjustedStart);
+        cents.push(corrCents);
       }
+
+      // --- Interior: flat at correction value ---
+      times.push(adjustedEnd);
+      cents.push(corrCents);
+
+      // --- Ramp out ---
+      // When gap overlaps with intrusion: transition starts at adjustedEnd inside
+      // the cluster. Next cluster's ramp-in will close the transition.
+      // When no overlap: ramp down to 0.
+      if (!gapOverlapsNext) {
+        const rampOutEnd = c.end_time + clampedRampOutS;
+        times.push(rampOutEnd);
+        cents.push(0);
+
+        // Add null separator if there's a real gap to next cluster's ramp zone
+        if (nxt) {
+          times.push(null);
+          cents.push(null);
+        }
+      }
+      // When gapOverlapsNext: line goes from (adjustedEnd, corrCents) to next's adjustedStart
     }
 
-    PitchPlot.updateCorrectionCurve(times, freqs);
+    console.log('[DEBUG] generateCorrectionCurve v3: points=', times.length,
+      'sample cents=', cents.filter(v => v !== null).slice(0, 12));
+    PitchPlot.updateCorrectionCurve(times, cents);
   }
 
   function updatePitchCurveForCluster(idx) {

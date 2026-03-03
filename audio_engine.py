@@ -24,7 +24,7 @@ DEFAULT_FREQUENCY_TOLERANCE_CENTS = 100
 DEFAULT_MIN_NOTE_DURATION_MS = 100
 DEFAULT_MAX_GAP_TO_BRIDGE_MS = 500
 DEFAULT_SILENCE_THRESHOLD_DB = -30
-DEFAULT_TRANSITION_RAMP_MS = 100
+DEFAULT_TRANSITION_RAMP_MS = 50
 DEFAULT_GAP_THRESHOLD_MS = 150
 DEFAULT_CORRECTION_STRENGTH = 90
 DEFAULT_MIDI_THRESHOLD_CENTS = 80
@@ -650,29 +650,79 @@ def generate_pitch_map(clusters, sr, audio_length, gap_threshold_ms=None, smooth
         pitch_map.append((total_frames - 1, 0.0))
         return sorted(pitch_map, key=lambda x: x[0])
 
-    for idx, (_, cluster) in enumerate(corrected):
+    # Build sorted list of (start_frame, end_frame) for ALL clusters,
+    # so ramps can be clamped to avoid overlapping any cluster.
+    all_cluster_frames = sorted(
+        (int(c["start_time"] * sr), int(c["end_time"] * sr))
+        for c in clusters
+    )
+
+    for idx, (orig_idx, cluster) in enumerate(corrected):
         start_frame = int(cluster["start_time"] * sr)
         end_frame = int(cluster["end_time"] * sr)
         base_shift = cluster["pitch_shift_semitones"]
         smoothing = cluster.get("smoothing_percent", 0)
-        half_ramp_in = int((cluster.get("ramp_in_ms", cluster.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)) / 2000.0) * sr)
-        half_ramp_out = int((cluster.get("ramp_out_ms", cluster.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)) / 2000.0) * sr)
-        # Clamp ramps so they never overlap inside the cluster
-        cluster_frames = end_frame - start_frame
-        if half_ramp_in + half_ramp_out > cluster_frames and cluster_frames > 0:
-            scale = cluster_frames / (half_ramp_in + half_ramp_out)
-            half_ramp_in = int(half_ramp_in * scale)
-            half_ramp_out = int(half_ramp_out * scale)
+        ramp_in_frames = int((cluster.get("ramp_in_ms", DEFAULT_TRANSITION_RAMP_MS) / 1000.0) * sr)
+        ramp_out_frames = int((cluster.get("ramp_out_ms", DEFAULT_TRANSITION_RAMP_MS) / 1000.0) * sr)
 
-        prev = corrected[idx - 1][1] if idx > 0 else None
-        nxt = corrected[idx + 1][1] if idx < len(corrected) - 1 else None
+        prev_corr = corrected[idx - 1][1] if idx > 0 else None
+        nxt_corr = corrected[idx + 1][1] if idx < len(corrected) - 1 else None
 
-        gap_prev = (
-            (cluster["start_time"] - prev["end_time"]) * 1000 if prev else float("inf")
-        )
-        gap_next = (
-            (nxt["start_time"] - cluster["end_time"]) * 1000 if nxt else float("inf")
-        )
+        # Find the nearest cluster (any, including uncorrected) before/after this one.
+        # Ramps must not extend into any cluster's time range.
+        nearest_end_before = 0  # latest end_frame of any cluster ending before this one starts
+        for cs, ce in all_cluster_frames:
+            if ce <= start_frame and ce > nearest_end_before:
+                nearest_end_before = ce
+        nearest_start_after = total_frames  # earliest start_frame of any cluster starting after this one ends
+        for cs, ce in all_cluster_frames:
+            if cs >= end_frame and cs < nearest_start_after:
+                nearest_start_after = cs
+
+        # Available space for ramps (frames between this cluster and nearest neighbor)
+        space_before = start_frame - nearest_end_before
+        space_after = nearest_start_after - end_frame
+
+        # Clamp ramp to available space (never overlap another cluster)
+        eff_ramp_in = min(ramp_in_frames, space_before)
+        eff_ramp_out = min(ramp_out_frames, space_after)
+
+        # Check if gap to prev/next corrected cluster is too small for full ramps
+        # (direct transition between two corrected clusters)
+        gap_prev_frames = (start_frame - int(prev_corr["end_time"] * sr)) if prev_corr else float("inf")
+        gap_next_frames = (int(nxt_corr["start_time"] * sr) - end_frame) if nxt_corr else float("inf")
+
+        gap_overlaps_prev = False
+        intrusion_in = 0   # frames to eat into start of this cluster
+        if prev_corr is not None:
+            prev_ramp_out = int((prev_corr.get("ramp_out_ms", DEFAULT_TRANSITION_RAMP_MS) / 1000.0) * sr)
+            desired_transition = prev_ramp_out + ramp_in_frames
+            if gap_prev_frames <= 0:
+                eff_ramp_in = 0
+                gap_overlaps_prev = True
+            elif gap_prev_frames < desired_transition:
+                gap_overlaps_prev = True
+                eff_ramp_in = 0
+                # Maintain full transition time by eating into clusters
+                shortfall = desired_transition - gap_prev_frames
+                cluster_half = (end_frame - start_frame) // 2
+                intrusion_in = min(shortfall // 2, cluster_half)
+
+        gap_overlaps_next = False
+        intrusion_out = 0  # frames to eat into end of this cluster
+        if nxt_corr is not None:
+            nxt_ramp_in = int((nxt_corr.get("ramp_in_ms", DEFAULT_TRANSITION_RAMP_MS) / 1000.0) * sr)
+            desired_transition = ramp_out_frames + nxt_ramp_in
+            if gap_next_frames <= 0:
+                eff_ramp_out = 0
+                gap_overlaps_next = True
+            elif gap_next_frames < desired_transition:
+                gap_overlaps_next = True
+                eff_ramp_out = 0
+                # Maintain full transition time by eating into clusters
+                shortfall = desired_transition - gap_next_frames
+                cluster_half = (end_frame - start_frame) // 2
+                intrusion_out = min(shortfall // 2, cluster_half)
 
         if smoothing > 0:
             frames = _compute_smoothed_frames(cluster, sr, smooth_curve)
@@ -697,46 +747,50 @@ def generate_pitch_map(clusters, sr, audio_length, gap_threshold_ms=None, smooth
                 f"[DEBUG] generate_pitch_map: note={cluster.get('note')} smoothing=0 — flat hold"
             )
 
-        # Ramp endpoints are always at the same positions and target base_shift,
-        # regardless of whether smoothing is active.  This keeps transition
-        # behaviour consistent — smoothing only affects the interior.
-        ramp_in_end = start_frame + half_ramp_in
-        ramp_out_start = end_frame - half_ramp_out
+        # Ramp zones are entirely outside the cluster (for non-overlap case)
+        ramp_in_start = max(0, start_frame - eff_ramp_in)
+        ramp_out_end = min(total_frames - 1, end_frame + eff_ramp_out)
 
-        # Ramp in: from prev_shift (or 0) outside cluster up to base_shift
-        prev_shift = (
-            prev["pitch_shift_semitones"]
-            if (prev and gap_prev < gap_threshold_ms)
-            else 0.0
-        )
-        if gap_prev < gap_threshold_ms:
-            pitch_map.append((max(0, start_frame - half_ramp_in), prev_shift))
+        # Adjusted cluster boundaries when intrusions eat into the cluster
+        adjusted_start = start_frame + intrusion_in
+        adjusted_end = end_frame - intrusion_out
+
+        # Ramp in: ramp up to base_shift at cluster start.
+        # When overlap with intrusion: transition extends into this cluster,
+        # so the flat hold starts at adjusted_start.
+        # When overlap without intrusion (gap<=0): direct interpolation.
+        # When no overlap: ramp from 0 before cluster.
+        if not gap_overlaps_prev:
+            if eff_ramp_in > 0:
+                pitch_map.append((ramp_in_start, 0.0))
+            elif prev_corr is None:
+                pitch_map.append((max(0, start_frame - 1), 0.0))
+            pitch_map.append((start_frame, base_shift))
         else:
-            pitch_map.append((max(0, start_frame - half_ramp_in - 1), 0.0))
-            pitch_map.append((max(0, start_frame - half_ramp_in), 0.0))
-        pitch_map.append((ramp_in_end, base_shift))
+            # Overlap: transition ends at adjusted_start (inside cluster)
+            pitch_map.append((adjusted_start, base_shift))
 
-        # Interior: per-frame smoothing points between ramp boundaries, or flat hold
+        # Interior: per-frame smoothing points, or flat hold
         if smoothing > 0 and frames:
             for frame, shift in frames:
-                if frame >= ramp_in_end and frame <= ramp_out_start:
+                if frame >= adjusted_start and frame <= adjusted_end:
                     pitch_map.append((frame, shift))
         else:
-            pitch_map.append((ramp_in_end, base_shift))
-            pitch_map.append((ramp_out_start, base_shift))
+            pitch_map.append((adjusted_start, base_shift))
+            pitch_map.append((adjusted_end, base_shift))
 
-        # Ramp out: from base_shift to next_shift (or 0) outside cluster
-        nxt_shift = (
-            nxt["pitch_shift_semitones"]
-            if (nxt and gap_next < gap_threshold_ms)
-            else 0.0
-        )
-        pitch_map.append((ramp_out_start, base_shift))
-        if gap_next < gap_threshold_ms:
-            pitch_map.append((end_frame + half_ramp_out, nxt_shift))
+        # Ramp out: from base_shift at cluster end.
+        # When overlap with intrusion: transition starts inside this cluster
+        # at adjusted_end. When no overlap: ramp to 0 after cluster.
+        if not gap_overlaps_next:
+            pitch_map.append((end_frame, base_shift))
+            if eff_ramp_out > 0:
+                pitch_map.append((ramp_out_end, 0.0))
+            elif nxt_corr is None:
+                pitch_map.append((min(total_frames - 1, end_frame + 1), 0.0))
         else:
-            pitch_map.append((end_frame + half_ramp_out, 0.0))
-            pitch_map.append((min(total_frames - 1, end_frame + half_ramp_out + 1), 0.0))
+            # Overlap: transition starts at adjusted_end (inside cluster)
+            pitch_map.append((adjusted_end, base_shift))
 
     pitch_map.append((total_frames - 1, 0.0))
     return sorted(pitch_map, key=lambda x: x[0])
@@ -931,28 +985,25 @@ def process_segment(audio, sr, clusters, cluster_idx, params, corrected_audio_pa
     # Build pitch map relative to segment
     seg_length = len(segment)
     shift = cluster["pitch_shift_semitones"]
-    half_ramp_in = int((cluster.get("ramp_in_ms", cluster.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)) / 2000.0) * sr)
-    half_ramp_out = int((cluster.get("ramp_out_ms", cluster.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)) / 2000.0) * sr)
+    ramp_in_frames = int((cluster.get("ramp_in_ms", DEFAULT_TRANSITION_RAMP_MS) / 1000.0) * sr)
+    ramp_out_frames = int((cluster.get("ramp_out_ms", DEFAULT_TRANSITION_RAMP_MS) / 1000.0) * sr)
 
     # Convert cluster times to segment-relative frames
     start_frame = int((cluster["start_time"] - seg_start) * sr)
     end_frame = int((cluster["end_time"] - seg_start) * sr)
     start_frame = max(0, start_frame)
     end_frame = min(seg_length - 1, end_frame)
-    # Clamp ramps so they never overlap inside the cluster
-    cluster_frames = end_frame - start_frame
-    if half_ramp_in + half_ramp_out > cluster_frames and cluster_frames > 0:
-        scale = cluster_frames / (half_ramp_in + half_ramp_out)
-        half_ramp_in = int(half_ramp_in * scale)
-        half_ramp_out = int(half_ramp_out * scale)
+
+    # Ramp zones are entirely outside the cluster
+    ramp_in_start = max(0, start_frame - ramp_in_frames)
+    ramp_out_end = min(seg_length - 1, end_frame + ramp_out_frames)
 
     pitch_map = [
         (0, 0.0),
-        (max(0, start_frame - half_ramp_in - 1), 0.0),
-        (max(0, start_frame - half_ramp_in), 0.0),
-        (min(seg_length - 1, start_frame + half_ramp_in), shift),
-        (max(0, end_frame - half_ramp_out), shift),
-        (min(seg_length - 1, end_frame + half_ramp_out), 0.0),
+        (ramp_in_start, 0.0),
+        (start_frame, shift),
+        (end_frame, shift),
+        (ramp_out_end, 0.0),
         (seg_length - 1, 0.0),
     ]
     pitch_map = sorted(set(pitch_map), key=lambda x: x[0])
@@ -1042,8 +1093,8 @@ def clusters_to_json(clusters):
                 "mean_freq": c["mean_freq"],
                 "duration_ms": c["duration_ms"],
                 "pitch_shift_semitones": c["pitch_shift_semitones"],
-                "ramp_in_ms": c.get("ramp_in_ms", c.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)),
-                "ramp_out_ms": c.get("ramp_out_ms", c.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)),
+                "ramp_in_ms": c.get("ramp_in_ms", DEFAULT_TRANSITION_RAMP_MS),
+                "ramp_out_ms": c.get("ramp_out_ms", DEFAULT_TRANSITION_RAMP_MS),
                 "correction_strength": c["correction_strength"],
                 "smoothing_percent": c["smoothing_percent"],
                 "pitch_variation_cents": c.get("pitch_variation_cents", 0),

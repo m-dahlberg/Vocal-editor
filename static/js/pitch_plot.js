@@ -19,11 +19,11 @@ const PitchPlot = (() => {
   let _fullXRange = [0, 10];
   let _fullYRange = [75, 600];
   let _correctionCurveTimes = [];
-  let _correctionCurveFreqs = [];
+  let _correctionCurveCents = [];
   let _playheadSvgPath = null; // Direct SVG reference for fast playhead updates
   let _sineTimeout = null; // Timeout for delayed sine wave start
   let _showMidi = true;
-  let _showCorrectionCurve = true;
+  let _showCorrectionCurve = false;
 
   const COLORS = {
     pitchLine:    '#2E86AB',
@@ -61,7 +61,7 @@ const PitchPlot = (() => {
       paper_bgcolor: '#1a1a2e',
       plot_bgcolor:  '#16213e',
       font: { color: '#e0e0e0', size: 11 },
-      margin: { l: 60, r: 20, t: 30, b: 50 },
+      margin: { l: 60, r: 60, t: 30, b: 50 },
       xaxis: {
         range: xRange,
         title: { text: 'Time (s)', font: { size: 11 } },
@@ -78,6 +78,19 @@ const PitchPlot = (() => {
         zerolinecolor: '#2a2a4a',
         tickfont: { size: 10 },
         fixedrange: true,
+      },
+      yaxis2: {
+        title: { text: 'Correction (cents)', font: { size: 10 } },
+        overlaying: 'y',
+        side: 'right',
+        range: [-300, 300],
+        zeroline: true,
+        zerolinecolor: '#FFA50044',
+        zerolinewidth: 1,
+        gridcolor: 'rgba(255,165,0,0.1)',
+        tickfont: { size: 9, color: '#FFA500' },
+        fixedrange: true,
+        showgrid: false,
       },
       showlegend: true,
       legend: {
@@ -120,13 +133,14 @@ const PitchPlot = (() => {
       });
     }
 
-    // Correction curve (always present, may be empty)
+    // Correction curve on secondary Y-axis (cents of correction)
     traces.push({
       x: _showCorrectionCurve ? _correctionCurveTimes : [],
-      y: _showCorrectionCurve ? _correctionCurveFreqs : [],
+      y: _showCorrectionCurve ? _correctionCurveCents : [],
       type: 'scatter', mode: 'lines',
-      name: 'Correction Curve',
+      name: 'Correction (cents)',
       line: { color: COLORS.correctionCurve, width: 2 },
+      yaxis: 'y2',
       hoverinfo: 'skip',
     });
 
@@ -312,8 +326,8 @@ const PitchPlot = (() => {
             clusterIdx: resizeEdge.clusterIdx,
             edge: resizeEdge.edge,
             startX: e.clientX,
-            originalRampIn: c.ramp_in_ms || c.transition_ramp_ms || 100,
-            originalRampOut: c.ramp_out_ms || c.transition_ramp_ms || 100,
+            originalRampIn: c.ramp_in_ms || 100,
+            originalRampOut: c.ramp_out_ms || 100,
           };
           hasMoved = false;
           e.preventDefault();
@@ -471,7 +485,9 @@ const PitchPlot = (() => {
 
         // Move all selected boxes via direct SVG writes
         const layout = el._fullLayout;
-        if (layout && _dragBoxSvgCache.length > 0) {
+        const hasSvgRefs = layout && _dragBoxSvgCache.length > 0 &&
+          _dragBoxSvgCache.some(c => c.paths && c.paths.length > 0);
+        if (hasSvgRefs) {
           const spacing = (_fullYRange[1] - _fullYRange[0]) / 30;
           const h = spacing * 0.8;
           for (const cached of _dragBoxSvgCache) {
@@ -491,8 +507,10 @@ const PitchPlot = (() => {
             }
           }
         } else {
-          // Fallback if SVG refs weren't found
-          _redrawDragBox(dragIdx);
+          // Fallback: use Plotly.restyle for all selected clusters
+          for (const idx of _selectedIndices) {
+            _redrawDragBox(idx);
+          }
         }
 
       } else if (mode === 'smooth-note') {
@@ -1057,16 +1075,24 @@ const PitchPlot = (() => {
     Plotly.restyle(el, { x: [_times], y: [_frequencies] }, [0]);
   }
 
-  function updateCorrectionCurve(curveTimes, curveFreqs) {
+  function updateCorrectionCurve(curveTimes, curveCents) {
     _correctionCurveTimes = curveTimes;
-    _correctionCurveFreqs = curveFreqs;
+    _correctionCurveCents = curveCents;
     // Correction curve trace index: 1 + hasMidi
     const hasMidi = _midiNotes.length > 0 ? 1 : 0;
     const curveTraceIdx = 1 + hasMidi;
     const el = document.getElementById('pitchPlot');
     const tx = _showCorrectionCurve ? curveTimes : [];
-    const ty = _showCorrectionCurve ? curveFreqs : [];
+    const ty = _showCorrectionCurve ? curveCents : [];
     Plotly.restyle(el, { x: [tx], y: [ty] }, [curveTraceIdx]);
+
+    // Auto-scale yaxis2 range based on correction values
+    const validCents = curveCents.filter(v => v !== null && !isNaN(v));
+    if (validCents.length > 0) {
+      const maxAbs = Math.max(Math.abs(Math.min(...validCents)), Math.abs(Math.max(...validCents)), 50);
+      const range = Math.ceil(maxAbs / 50) * 50 + 50; // Round up to next 50 + padding
+      Plotly.relayout(el, { 'yaxis2.range': [-range, range] });
+    }
   }
 
   function deleteCluster(idx) {
