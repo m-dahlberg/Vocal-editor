@@ -18,11 +18,13 @@ from audio_engine import (
     autocorrect_midi, autocorrect_standard,
     process_full_audio, process_segment,
     clusters_to_json, get_audio_mono, hz_to_note,
+    compute_avg_pitch_deviation, compute_cluster_pitch_variation,
     DEFAULT_TIME_RESOLUTION_MS, DEFAULT_MIN_FREQUENCY, DEFAULT_MAX_FREQUENCY,
     DEFAULT_FREQUENCY_TOLERANCE_CENTS, DEFAULT_MIN_NOTE_DURATION_MS,
     DEFAULT_MAX_GAP_TO_BRIDGE_MS, DEFAULT_SILENCE_THRESHOLD_DB,
     DEFAULT_TRANSITION_RAMP_MS, DEFAULT_GAP_THRESHOLD_MS,
     DEFAULT_CORRECTION_STRENGTH, DEFAULT_MIDI_THRESHOLD_CENTS,
+    DEFAULT_AUTOCORRECT_SMOOTHING, DEFAULT_SMOOTHING_THRESHOLD_CENTS, DEFAULT_SMOOTH_CURVE,
     DEFAULT_RUBBERBAND_COMMAND, DEFAULT_RUBBERBAND_CRISP,
     DEFAULT_RUBBERBAND_FORMANT, DEFAULT_RUBBERBAND_PITCH_HQ,
     DEFAULT_RUBBERBAND_WINDOW_LONG, DEFAULT_RUBBERBAND_SMOOTHING,
@@ -64,6 +66,9 @@ def get_default_params():
         'gap_threshold_ms': DEFAULT_GAP_THRESHOLD_MS,
         'correction_strength': DEFAULT_CORRECTION_STRENGTH,
         'midi_threshold_cents': DEFAULT_MIDI_THRESHOLD_CENTS,
+        'autocorrect_smoothing': DEFAULT_AUTOCORRECT_SMOOTHING,
+        'smoothing_threshold_cents': DEFAULT_SMOOTHING_THRESHOLD_CENTS,
+        'smooth_curve': DEFAULT_SMOOTH_CURVE,
         'rb': {
             'command': DEFAULT_RUBBERBAND_COMMAND,
             'crisp': DEFAULT_RUBBERBAND_CRISP,
@@ -143,6 +148,11 @@ def analyze():
         sf.write(SESSION['corrected_path'], audio_mono, int(sr))
         SESSION['corrected_audio'] = audio_mono.copy()
 
+        # Compute average pitch deviation vs MIDI if available
+        avg_deviation = None
+        if SESSION['midi_notes']:
+            avg_deviation = compute_avg_pitch_deviation(clusters, SESSION['midi_notes'], SESSION['params'])
+
         return jsonify({
             'ok': True,
             'duration': float(len(audio_mono) / sr),
@@ -152,6 +162,7 @@ def analyze():
             'times': times.tolist(),
             'frequencies': [float(f) if not np.isnan(f) else None for f in frequencies],
             'midi_notes': SESSION['midi_notes'],
+            'avg_pitch_deviation_cents': avg_deviation,
         })
 
     except Exception as e:
@@ -236,20 +247,23 @@ def sync_clusters():
         # Recalculate note from mean_freq
         note = hz_to_note(mean_freq) or c.get('note', 'A4')
 
-        new_clusters.append({
+        new_cluster = {
             'note':                  note,
             'start_time':            start_time,
             'end_time':              end_time,
             'mean_freq':             mean_freq,
             'duration_ms':           (end_time - start_time) * 1000,
             'pitch_shift_semitones': float(c.get('pitch_shift_semitones', 0)),
-            'transition_ramp_ms':    float(c.get('transition_ramp_ms', transition_ramp)),
+            'ramp_in_ms':            float(c.get('ramp_in_ms', c.get('transition_ramp_ms', transition_ramp))),
+            'ramp_out_ms':           float(c.get('ramp_out_ms', c.get('transition_ramp_ms', transition_ramp))),
             'correction_strength':   float(c.get('correction_strength', correction_strength)),
             'smoothing_percent':     float(c.get('smoothing_percent', 0)),
             'manually_edited':       bool(c.get('manually_edited', False)),
             'times':                 cluster_times,
             'frequencies':           cluster_freqs,
-        })
+        }
+        new_cluster['pitch_variation_cents'] = compute_cluster_pitch_variation(new_cluster)
+        new_clusters.append(new_cluster)
 
         print(f"[DEBUG] cluster {note} {start_time:.2f}-{end_time:.2f}s | "
               f"smoothing_percent={float(c.get('smoothing_percent', 0)):.1f} | "
@@ -295,8 +309,10 @@ def correct_cluster():
     cluster = SESSION['clusters'][cluster_idx]
     if 'pitch_shift_semitones' in data:
         cluster['pitch_shift_semitones'] = float(data['pitch_shift_semitones'])
-    if 'transition_ramp_ms' in data:
-        cluster['transition_ramp_ms'] = float(data['transition_ramp_ms'])
+    if 'ramp_in_ms' in data:
+        cluster['ramp_in_ms'] = float(data['ramp_in_ms'])
+    if 'ramp_out_ms' in data:
+        cluster['ramp_out_ms'] = float(data['ramp_out_ms'])
     if 'correction_strength' in data:
         cluster['correction_strength'] = float(data['correction_strength'])
     if 'smoothing_percent' in data:
@@ -488,7 +504,7 @@ def update_cluster():
         return jsonify({'error': 'Invalid cluster index'}), 400
 
     cluster = SESSION['clusters'][cluster_idx]
-    for key in ['transition_ramp_ms', 'correction_strength', 'smoothing_percent']:
+    for key in ['ramp_in_ms', 'ramp_out_ms', 'correction_strength', 'smoothing_percent']:
         if key in data:
             cluster[key] = float(data[key])
 

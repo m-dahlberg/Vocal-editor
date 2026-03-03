@@ -46,6 +46,9 @@ const App = (() => {
       gap_threshold_ms:          n('p_gap_threshold_ms'),
       correction_strength:       n('p_correction_strength'),
       midi_threshold_cents:      n('p_midi_threshold_cents'),
+      autocorrect_smoothing:     n('p_autocorrect_smoothing'),
+      smoothing_threshold_cents: n('p_smoothing_threshold_cents'),
+      smooth_curve:             n('p_smooth_curve'),
       rb: {
         command:     s('p_rb_command'),
         crisp:       parseInt(document.getElementById('p_rb_crisp').value),
@@ -65,8 +68,13 @@ const App = (() => {
 
     const panel = document.getElementById('clusterDetails');
     const shift_cents = (cluster.pitch_shift_semitones * 100).toFixed(1);
+    const selectedIndices = PitchPlot.getSelectedIndices();
+    const multiCount = selectedIndices.length;
 
     panel.innerHTML = `
+      ${multiCount > 1 ? `<div class="cluster-detail-row" style="background:var(--bg3);border-radius:4px;padding:6px;margin-bottom:6px;">
+        <span class="label" style="font-weight:600;color:var(--accent);">${multiCount} notes selected</span>
+      </div>` : ''}
       <div class="cluster-detail-row">
         <span class="label">Cluster</span>
         <span class="value">#${idx + 1}</span>
@@ -92,6 +100,10 @@ const App = (() => {
         <span class="value">${cluster.mean_freq.toFixed(1)} Hz</span>
       </div>
       <div class="cluster-detail-row">
+        <span class="label">Pitch variation</span>
+        <span class="value">${(cluster.pitch_variation_cents || 0).toFixed(1)} cents</span>
+      </div>
+      <div class="cluster-detail-row">
         <span class="label">Correction</span>
         <span class="value">${shift_cents} cents</span>
       </div>
@@ -105,43 +117,64 @@ const App = (() => {
       </div>
 
       <div class="cluster-param-row">
-        <label>Transition ramp (ms)</label>
-        <input type="number" id="cn_transition_ramp_ms" value="${cluster.transition_ramp_ms}">
+        <label>Ramp in (ms)</label>
+        <div class="slider-input-pair">
+          <input type="range" id="cn_ramp_in_ms_slider" min="0" max="1000" value="${cluster.ramp_in_ms}">
+          <input type="number" id="cn_ramp_in_ms" value="${cluster.ramp_in_ms}" min="0">
+        </div>
       </div>
       <div class="cluster-param-row">
-        <label>Correction strength (%)</label>
-        <input type="number" id="cn_correction_strength" value="${cluster.correction_strength}" min="0" max="100">
+        <label>Ramp out (ms)</label>
+        <div class="slider-input-pair">
+          <input type="range" id="cn_ramp_out_ms_slider" min="0" max="1000" value="${cluster.ramp_out_ms}">
+          <input type="number" id="cn_ramp_out_ms" value="${cluster.ramp_out_ms}" min="0">
+        </div>
       </div>
       <div class="cluster-param-row">
         <label>Smoothing (%)</label>
-        <input type="number" id="cn_smoothing_percent" value="${cluster.smoothing_percent}" min="0" max="100">
+        <div class="slider-input-pair">
+          <input type="range" id="cn_smoothing_percent_slider" min="0" max="100" value="${cluster.smoothing_percent}">
+          <input type="number" id="cn_smoothing_percent" value="${cluster.smoothing_percent}" min="0" max="100">
+        </div>
       </div>
-
-      <button class="btn btn-primary" id="btnApplyCluster">Apply to note</button>
     `;
 
-    document.getElementById('btnApplyCluster').addEventListener('click', applyClusterEdit);
+    // Wire bidirectional sync between sliders and number inputs,
+    // and apply changes live to the pitch graph on every input event.
+    const sliderPairs = [
+      ['cn_ramp_in_ms_slider', 'cn_ramp_in_ms'],
+      ['cn_ramp_out_ms_slider', 'cn_ramp_out_ms'],
+      ['cn_smoothing_percent_slider', 'cn_smoothing_percent'],
+    ];
+    for (const [sliderId, numberId] of sliderPairs) {
+      const slider = document.getElementById(sliderId);
+      const number = document.getElementById(numberId);
+      slider.addEventListener('input', () => { number.value = slider.value; applyPanelEditsLive(); });
+      number.addEventListener('input', () => { slider.value = number.value; applyPanelEditsLive(); });
+    }
   }
 
-  async function applyClusterEdit() {
+  function applyPanelEditsLive() {
     if (_state.selectedIdx === null) return;
 
-    const idx = _state.selectedIdx;
-    const updates = {
-      transition_ramp_ms:  parseFloat(document.getElementById('cn_transition_ramp_ms').value),
-      correction_strength: parseFloat(document.getElementById('cn_correction_strength').value),
-      smoothing_percent:   parseFloat(document.getElementById('cn_smoothing_percent').value),
-    };
+    const rampIn    = parseFloat(document.getElementById('cn_ramp_in_ms').value);
+    const rampOut   = parseFloat(document.getElementById('cn_ramp_out_ms').value);
+    const smoothing = parseFloat(document.getElementById('cn_smoothing_percent').value);
 
-    const cluster = _state.clusters[idx];
-    Object.assign(cluster, updates);
-    cluster.manually_edited = true;
-    _state.dirtyClusters.add(idx);
+    const selectedIndices = PitchPlot.getSelectedIndices();
+    const indices = selectedIndices.length > 0 ? selectedIndices : [_state.selectedIdx];
 
-    PitchPlot.updateCluster(idx, cluster);
-    updatePitchCurveForCluster(idx); // Update pitch curve with new ramp/strength
-    showClusterDetails(idx, cluster);
-    log(`✓ Cluster ${idx + 1} parameters updated (will process on playback)`);
+    for (const idx of indices) {
+      const cluster = _state.clusters[idx];
+      cluster.ramp_in_ms = rampIn;
+      cluster.ramp_out_ms = rampOut;
+      cluster.smoothing_percent = smoothing;
+      cluster.manually_edited = true;
+      _state.dirtyClusters.add(idx);
+      updatePitchCurveForCluster(idx);
+    }
+
+    generateCorrectionCurve();
   }
 
   // ---- PROCESSING OVERLAY ----
@@ -169,7 +202,8 @@ const App = (() => {
     
     // Calculate and update the expected pitch curve for this segment
     updatePitchCurveForCluster(idx);
-    
+    generateCorrectionCurve();
+
     log(`✓ Cluster ${idx + 1} moved to ${(newShift * 100).toFixed(1)} cents (will process on playback)`);
   }
 
@@ -186,31 +220,60 @@ const App = (() => {
     
     PitchPlot.updateCluster(idx, cluster);
     updatePitchCurveForCluster(idx);
-    
+    generateCorrectionCurve();
+
     if (_state.selectedIdx === idx) {
       showClusterDetails(idx, cluster);
     }
-    
+
     log(`✓ Cluster ${idx + 1} resized to ${cluster.duration_ms.toFixed(0)}ms`);
   }
 
   // ---- SMOOTHING CALLBACK ----
 
   async function onClusterSmoothing(idx, newSmoothing) {
-    _state.clusters[idx].smoothing_percent = newSmoothing;
-    _state.clusters[idx].manually_edited = true;
-    _state.dirtyClusters.add(idx);
+    const selectedIndices = PitchPlot.getSelectedIndices();
+    const indices = selectedIndices.length > 1 && selectedIndices.includes(idx) ? selectedIndices : [idx];
+
+    for (const i of indices) {
+      _state.clusters[i].smoothing_percent = newSmoothing;
+      _state.clusters[i].manually_edited = true;
+      _state.dirtyClusters.add(i);
+      updatePitchCurveForCluster(i);
+    }
 
     // Update the smoothing input in the details panel if this cluster is selected
     if (_state.selectedIdx === idx) {
       const smoothingInput = document.getElementById('cn_smoothing_percent');
       if (smoothingInput) smoothingInput.value = newSmoothing.toFixed(1);
+      const smoothingSlider = document.getElementById('cn_smoothing_percent_slider');
+      if (smoothingSlider) smoothingSlider.value = newSmoothing.toFixed(1);
     }
 
-    // Immediate approximate preview
-    updatePitchCurveForCluster(idx);
+    log(`✓ ${indices.length} cluster(s) smoothing set to ${newSmoothing.toFixed(1)}%`);
+  }
 
-    log(`✓ Cluster ${idx + 1} smoothing set to ${newSmoothing.toFixed(1)}%`);
+  // ---- RAMP DRAG CALLBACK ----
+
+  async function onClusterRampDrag(idx, rampInMs, rampOutMs) {
+    const selectedIndices = PitchPlot.getSelectedIndices();
+    const indices = selectedIndices.length > 1 && selectedIndices.includes(idx) ? selectedIndices : [idx];
+
+    for (const i of indices) {
+      _state.clusters[i].ramp_in_ms = rampInMs;
+      _state.clusters[i].ramp_out_ms = rampOutMs;
+      _state.clusters[i].manually_edited = true;
+      _state.dirtyClusters.add(i);
+      updatePitchCurveForCluster(i);
+    }
+
+    generateCorrectionCurve();
+
+    if (_state.selectedIdx === idx) {
+      showClusterDetails(idx, _state.clusters[idx]);
+    }
+
+    log(`✓ ${indices.length} cluster(s) ramp: in=${rampInMs.toFixed(0)}ms, out=${rampOutMs.toFixed(0)}ms`);
   }
 
   // ---- DRAW BOX CALLBACK ----
@@ -275,7 +338,8 @@ const App = (() => {
       mean_freq: meanFreq,
       duration_ms: (endTime - startTime) * 1000,
       pitch_shift_semitones: 0,
-      transition_ramp_ms: getParams().transition_ramp_ms,
+      ramp_in_ms: getParams().transition_ramp_ms,
+      ramp_out_ms: getParams().transition_ramp_ms,
       correction_strength: getParams().correction_strength,
       smoothing_percent: 0,
       manually_edited: true,
@@ -290,9 +354,10 @@ const App = (() => {
     _state.clusters.splice(insertIdx, 0, newCluster);
     _state.dirtyClusters.add(insertIdx);
     
-    // Re-render
-    PitchPlot.render(_state.times, _state.frequencies, _state.clusters, null);
-    
+    // Re-render (null times/freqs to preserve zoom)
+    PitchPlot.render(null, null, _state.clusters, null);
+    generateCorrectionCurve();
+
     log(`✓ New cluster created: ${bestNote} at ${startTime.toFixed(2)}s, ${points.length} points`);
   }
 
@@ -315,18 +380,26 @@ const App = (() => {
     if (corrected.length === 0) return 0;
 
     for (let i = 0; i < corrected.length; i++) {
-      const c         = corrected[i];
-      const halfRampS = c.transition_ramp_ms / 2000.0;
+      const c             = corrected[i];
+      let halfRampInS   = (c.ramp_in_ms  || c.transition_ramp_ms || 100) / 2000.0;
+      let halfRampOutS  = (c.ramp_out_ms || c.transition_ramp_ms || 100) / 2000.0;
+      // Clamp ramps so they never overlap inside the cluster
+      const clusterDurS = c.end_time - c.start_time;
+      if (halfRampInS + halfRampOutS > clusterDurS && clusterDurS > 0) {
+        const scale = clusterDurS / (halfRampInS + halfRampOutS);
+        halfRampInS  *= scale;
+        halfRampOutS *= scale;
+      }
       const prev      = i > 0 ? corrected[i - 1] : null;
       const nxt       = i < corrected.length - 1 ? corrected[i + 1] : null;
 
       const gapPrevMs = prev ? (c.start_time - prev.end_time) * 1000 : Infinity;
       const gapNextMs = nxt  ? (nxt.start_time - c.end_time)  * 1000 : Infinity;
 
-      const rampInStart  = c.start_time - halfRampS;
-      const rampInEnd    = c.start_time + halfRampS;
-      const rampOutStart = c.end_time   - halfRampS;
-      const rampOutEnd   = c.end_time   + halfRampS;
+      const rampInStart  = c.start_time - halfRampInS;
+      const rampInEnd    = c.start_time + halfRampInS;
+      const rampOutStart = c.end_time   - halfRampOutS;
+      const rampOutEnd   = c.end_time   + halfRampOutS;
 
       // Skip clusters whose ramp zone doesn't cover t.
       if (t < rampInStart || t > rampOutEnd) continue;
@@ -356,6 +429,74 @@ const App = (() => {
     return 0; // t is between clusters, outside all ramp zones.
   }
 
+  // Generate correction curve: a continuous orange line connecting all corrected
+  // clusters.  Between adjacent clusters the ramp-out and ramp-in lines meet
+  // at a single midpoint centered in both time and pitch (average of the two
+  // target frequencies).  No horizontal gap segments — the lines slope directly
+  // from rampOutStart through the midpoint to the next rampInEnd.
+  function generateCorrectionCurve() {
+    const allClusters = _state.clusters;
+
+    if (allClusters.length === 0) {
+      PitchPlot.updateCorrectionCurve([], []);
+      return;
+    }
+
+    const times = [];
+    const freqs = [];
+
+    // Pre-compute target frequencies for all clusters
+    const targets = allClusters.map(c =>
+      c.mean_freq * Math.pow(2, c.pitch_shift_semitones / 12)
+    );
+
+    for (let i = 0; i < allClusters.length; i++) {
+      const c = allClusters[i];
+
+      let halfRampInS  = (c.ramp_in_ms  || c.transition_ramp_ms || 100) / 2000.0;
+      let halfRampOutS = (c.ramp_out_ms || c.transition_ramp_ms || 100) / 2000.0;
+      // Clamp ramps so they never overlap inside the cluster
+      const dur = c.end_time - c.start_time;
+      if (halfRampInS + halfRampOutS > dur && dur > 0) {
+        const scale = dur / (halfRampInS + halfRampOutS);
+        halfRampInS  *= scale;
+        halfRampOutS *= scale;
+      }
+
+      const targetFreq   = targets[i];
+      const rampInEnd    = c.start_time + halfRampInS;
+      const rampOutStart = c.end_time   - halfRampOutS;
+
+      // --- Leading edge (first cluster only) ---
+      if (i === 0) {
+        times.push(c.start_time);
+        freqs.push(c.mean_freq);
+      }
+      // For i > 0: the midpoint was already emitted by the previous iteration
+
+      // Ramp in end → flat interior → ramp out start
+      times.push(rampInEnd);
+      freqs.push(targetFreq);
+      times.push(rampOutStart);
+      freqs.push(targetFreq);
+
+      // --- Midpoint to next cluster, or trailing edge ---
+      if (i < allClusters.length - 1) {
+        // Midpoint: centered in time and pitch between this and next target
+        const midTime = (c.end_time + allClusters[i + 1].start_time) / 2;
+        const midFreq = (targetFreq + targets[i + 1]) / 2;
+        times.push(midTime);
+        freqs.push(midFreq);
+      } else {
+        // Last cluster: end at cluster edge at mean_freq
+        times.push(c.end_time);
+        freqs.push(c.mean_freq);
+      }
+    }
+
+    PitchPlot.updateCorrectionCurve(times, freqs);
+  }
+
   function updatePitchCurveForCluster(idx) {
     const cluster      = _state.clusters[idx];
     const buffer       = 0.3;
@@ -364,6 +505,25 @@ const App = (() => {
 
     const newTimes = [];
     const newFreqs = [];
+    const smoothCurve = parseFloat(document.getElementById('p_smooth_curve').value) || 1.0;
+
+    // Precompute max deviation per cluster for power curve smoothing
+    const clusterMaxDevCache = new Map();
+    if (smoothCurve > 1.0) {
+      for (const c of _state.clusters) {
+        if (!c.smoothing_percent) continue;
+        let maxDev = 0;
+        for (let j = 0; j < _state.originalTimes.length; j++) {
+          const tj = _state.originalTimes[j];
+          const fj = _state.originalFrequencies[j];
+          if (tj >= c.start_time && tj <= c.end_time && fj && !isNaN(fj)) {
+            const dev = Math.abs(12 * Math.log2(fj / c.mean_freq));
+            if (dev > maxDev) maxDev = dev;
+          }
+        }
+        clusterMaxDevCache.set(c, maxDev || 1);
+      }
+    }
 
     for (let i = 0; i < _state.originalTimes.length; i++) {
       const t     = _state.originalTimes[i];
@@ -389,8 +549,21 @@ const App = (() => {
       if (owningCluster && owningCluster.smoothing_percent > 0) {
         const smoothing          = owningCluster.smoothing_percent / 100;
         const deviationSemitones = 12 * Math.log2(origF / owningCluster.mean_freq);
-        const smoothedDeviation  = deviationSemitones * (1 - smoothing);
         const correctionShift    = owningCluster.pitch_shift_semitones;
+
+        let smoothedDeviation;
+        if (smoothCurve <= 1.0) {
+          // Linear (original behavior)
+          smoothedDeviation = deviationSemitones * (1 - smoothing);
+        } else {
+          // Power curve: remaining = sign(d) * (|d|/max)^(1/curve) * max * (1-smoothing)
+          const maxDev = clusterMaxDevCache.get(owningCluster) || 1;
+          const absDev = Math.abs(deviationSemitones);
+          const norm = absDev / maxDev;
+          const curvedNorm = Math.pow(norm, 1.0 / smoothCurve);
+          smoothedDeviation = Math.sign(deviationSemitones) * curvedNorm * maxDev * (1 - smoothing);
+        }
+
         newFreqs.push(owningCluster.mean_freq * Math.pow(2, (smoothedDeviation + correctionShift) / 12));
       } else {
         newFreqs.push(shiftedF);
@@ -419,7 +592,8 @@ const App = (() => {
         note:                  c.note,
         mean_freq:             c.mean_freq,
         pitch_shift_semitones: c.pitch_shift_semitones,
-        transition_ramp_ms:    c.transition_ramp_ms,
+        ramp_in_ms:            c.ramp_in_ms,
+        ramp_out_ms:           c.ramp_out_ms,
         correction_strength:   c.correction_strength,
         smoothing_percent:     c.smoothing_percent,
         manually_edited:       c.manually_edited || false,
@@ -459,6 +633,7 @@ const App = (() => {
 
       Waveform.load(API.audioUrl());
       _state.dirtyClusters.clear();
+      generateCorrectionCurve();
       log(`✓ All edits processed`);
 
     } catch (e) {
@@ -503,6 +678,16 @@ const App = (() => {
 
       Waveform.load(API.audioUrl());
 
+      // Update avg pitch deviation display
+      const devEl = document.getElementById('avgPitchDeviation');
+      if (result.avg_pitch_deviation_cents != null) {
+        devEl.textContent = result.avg_pitch_deviation_cents.toFixed(1);
+      } else {
+        devEl.textContent = '—';
+      }
+
+      generateCorrectionCurve();
+
       log(`✓ Analysis complete: ${result.cluster_count} clusters, ${result.duration.toFixed(1)}s`);
       document.getElementById('clusterDetails').innerHTML = '<p class="placeholder">Click a note box to select it</p>';
 
@@ -543,6 +728,7 @@ const App = (() => {
         updatePitchCurveForCluster(i);
         _state.dirtyClusters.add(i);
       }
+      generateCorrectionCurve();
 
       log('✓ Corrections calculated — press Update Audio to apply');
 
@@ -659,9 +845,10 @@ const App = (() => {
         );
       }
 
-      // Sync plot boxes and reload waveform audio
-      PitchPlot.render(_state.times, _state.frequencies, _state.clusters, null);
+      // Sync plot boxes and reload waveform audio (null times/freqs to preserve zoom)
+      PitchPlot.render(null, null, _state.clusters, null);
       Waveform.load(API.audioUrl());
+      generateCorrectionCurve();
 
       document.getElementById('clusterDetails').innerHTML =
         '<p class="placeholder">Click a note box to select it</p>';
@@ -688,6 +875,14 @@ const App = (() => {
     document.getElementById('btnUpdateAudio').addEventListener('click', processDirtyClusters);
     document.getElementById('btnExport').addEventListener('click', runExport);
 
+    // Overlay toggles
+    document.getElementById('chkMidi').addEventListener('change', (e) => {
+      PitchPlot.setShowMidi(e.target.checked);
+    });
+    document.getElementById('chkCorrectionCurve').addEventListener('change', (e) => {
+      PitchPlot.setShowCorrectionCurve(e.target.checked);
+    });
+
     // Initialize pitch plot
     PitchPlot.init({
       onSelect: (idx, cluster) => showClusterDetails(idx, cluster),
@@ -696,6 +891,7 @@ const App = (() => {
       onDrawBox: (start, end) => onDrawBox(start, end),
       onDelete: (idx) => onClusterDelete(idx),
       onSmoothing: (idx, smoothing) => onClusterSmoothing(idx, smoothing),
+      onRampDrag: (idx, rampIn, rampOut) => onClusterRampDrag(idx, rampIn, rampOut),
     });
 
     // Initialize waveform with playhead sync

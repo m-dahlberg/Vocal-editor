@@ -24,6 +24,10 @@
     </label>
     <span id="fileStatus" class="file-status"></span>
   </div>
+  <div class="overlay-toggles">
+    <label class="checkbox-label"><input type="checkbox" id="chkMidi" checked> MIDI</label>
+    <label class="checkbox-label"><input type="checkbox" id="chkCorrectionCurve" checked> Correction</label>
+  </div>
 </header>
 
 <!-- MAIN LAYOUT -->
@@ -44,15 +48,21 @@
         <label>Max gap to bridge (ms)<input type="number" id="p_max_gap_to_bridge_ms" value="500"></label>
         <label>Silence threshold (dB)<input type="number" id="p_silence_threshold_db" value="-30"></label>
       </div>
+      <div class="param-group" style="margin-top:6px;">
+        <label>Avg pitch deviation (cents)<span id="avgPitchDeviation" style="float:right; color:var(--accent2);">—</span></label>
+      </div>
     </section>
 
     <section>
       <h3>Correction</h3>
       <div class="param-group">
-        <label>Transition ramp (ms)<input type="number" id="p_transition_ramp_ms" value="300"></label>
+        <label>Transition ramp (ms)<input type="number" id="p_transition_ramp_ms" value="100"></label>
         <label>Gap threshold (ms)<input type="number" id="p_gap_threshold_ms" value="150"></label>
         <label>Correction strength (%)<input type="number" id="p_correction_strength" value="90" min="0" max="100"></label>
         <label>MIDI threshold (cents)<input type="number" id="p_midi_threshold_cents" value="80"></label>
+        <label>Auto smooth (%)<input type="number" id="p_autocorrect_smoothing" value="0" min="0" max="100"></label>
+        <label>Smooth threshold (cents)<input type="number" id="p_smoothing_threshold_cents" value="0" min="0"></label>
+        <label>Smooth curve<input type="number" id="p_smooth_curve" value="1.0" min="1.0" step="0.1"></label>
       </div>
     </section>
 
@@ -92,7 +102,7 @@
       <div id="pitchPlot"></div>
       <div class="plot-controls">
         <button class="btn btn-secondary btn-sm" id="btnResetView">⟲ Reset View</button>
-        <span class="zoom-hint">Scroll to zoom X · Shift+Scroll to zoom Y · Drag to pan · Drag note to shift pitch</span>
+        <span class="zoom-hint">Scroll to zoom X · Shift+Scroll to zoom Y · Ctrl+Shift+Drag to pan · Drag to select · Shift+click to multi-select</span>
       </div>
       <div id="processingOverlay" class="processing-overlay hidden">
         <div class="processing-text">⏳ Processing...</div>

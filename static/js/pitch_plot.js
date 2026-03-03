@@ -5,23 +5,29 @@ const PitchPlot = (() => {
   let _times = [];
   let _frequencies = [];
   let _midiNotes = [];
-  let _selectedIdx = null;
+  let _selectedIndices = new Set();
   let _onClusterSelect = null;
   let _onClusterDrag = null;
   let _onClusterResize = null;
   let _onDrawBox = null;
   let _onDeleteCluster = null;
   let _onClusterSmoothing = null;
+  let _onClusterRampDrag = null;
   let _playheadTime = 0;
   let _yRange = [75, 600];
   let _xRange = [0, 10];
   let _fullXRange = [0, 10];
   let _fullYRange = [75, 600];
+  let _correctionCurveTimes = [];
+  let _correctionCurveFreqs = [];
   let _playheadSvgPath = null; // Direct SVG reference for fast playhead updates
   let _sineTimeout = null; // Timeout for delayed sine wave start
+  let _showMidi = true;
+  let _showCorrectionCurve = true;
 
   const COLORS = {
     pitchLine:    '#2E86AB',
+    correctionCurve: '#FFA500',
     noteBox:      'rgba(255,140,66,0.25)',
     noteBoxEdge:  '#D96C2C',
     noteSelected: 'rgba(233,69,96,0.35)',
@@ -86,7 +92,7 @@ const PitchPlot = (() => {
     };
   }
 
-  function buildTraces(times, frequencies, clusters, midiNotes, selectedIdx, dragYRange) {
+  function buildTraces(times, frequencies, clusters, midiNotes, selectedIndices) {
     const traces = [];
 
     traces.push({
@@ -99,9 +105,11 @@ const PitchPlot = (() => {
 
     if (midiNotes && midiNotes.length > 0) {
       const mx = [], my = [];
-      for (const n of midiNotes) {
-        mx.push(n.start_time, n.end_time, null);
-        my.push(n.frequency, n.frequency, null);
+      if (_showMidi) {
+        for (const n of midiNotes) {
+          mx.push(n.start_time, n.end_time, null);
+          my.push(n.frequency, n.frequency, null);
+        }
       }
       traces.push({
         x: mx, y: my,
@@ -112,14 +120,24 @@ const PitchPlot = (() => {
       });
     }
 
-    // Use dragYRange if provided (locks box height during drag), otherwise use current _yRange
-    const yRangeForBoxes = dragYRange || _yRange;
-    const spacing = (yRangeForBoxes[1] - yRangeForBoxes[0]) / 30;
+    // Correction curve (always present, may be empty)
+    traces.push({
+      x: _showCorrectionCurve ? _correctionCurveTimes : [],
+      y: _showCorrectionCurve ? _correctionCurveFreqs : [],
+      type: 'scatter', mode: 'lines',
+      name: 'Correction Curve',
+      line: { color: COLORS.correctionCurve, width: 2 },
+      hoverinfo: 'skip',
+    });
+
+    // Always use _fullYRange for box height so boxes maintain constant data-space
+    // size and naturally scale when the user zooms in/out vertically.
+    const spacing = (_fullYRange[1] - _fullYRange[0]) / 30;
     const h = spacing * 0.8;
 
     for (let i = 0; i < clusters.length; i++) {
       const c = clusters[i];
-      const isSelected = i === selectedIdx;
+      const isSelected = selectedIndices.has(i);
       const freq = c.mean_freq + (c.pitch_shift_semitones * c.mean_freq * (Math.pow(2, 1/12) - 1));
 
       traces.push({
@@ -160,7 +178,7 @@ const PitchPlot = (() => {
     if (!layout) return null;
     const x = layout.xaxis.p2d(e.clientX - rect.left - layout.margin.l);
     const y = layout.yaxis.p2d(e.clientY - rect.top - layout.margin.t);
-    const spacing = (_yRange[1] - _yRange[0]) / 30;
+    const spacing = (_fullYRange[1] - _fullYRange[0]) / 30;
     const h = spacing * 0.8;
     for (let i = _clusters.length - 1; i >= 0; i--) {
       const c = _clusters[i];
@@ -182,9 +200,9 @@ const PitchPlot = (() => {
     const y = layout.yaxis.p2d(py);
     
     const resizeThresholdPx = 10;
-    const spacing = (_yRange[1] - _yRange[0]) / 30;
+    const spacing = (_fullYRange[1] - _fullYRange[0]) / 30;
     const h = spacing * 0.8;
-    
+
     for (let i = _clusters.length - 1; i >= 0; i--) {
       const c = _clusters[i];
       const freq = c.mean_freq + (c.pitch_shift_semitones * c.mean_freq * (Math.pow(2, 1/12) - 1));
@@ -222,11 +240,12 @@ const PitchPlot = (() => {
   // Trace layout: 0=pitch line, 1=MIDI (optional), then per cluster: [box, label] pairs, last=playhead.
   function _boxTraceIndex(clusterIdx) {
     const hasMidi = _midiNotes.length > 0 ? 1 : 0;
-    return 1 + hasMidi + clusterIdx * 2;
+    // Trace order: 0=pitch, 1(opt)=MIDI, next=correction curve, then boxes (2 per cluster)
+    return 2 + hasMidi + clusterIdx * 2;
   }
 
   function _setupInteractions(el) {
-    let mode = null; // 'drag-note' | 'resize-box' | 'draw-box' | 'pan' | 'smooth-note'
+    let mode = null; // 'drag-note' | 'resize-box' | 'draw-box' | 'pan' | 'smooth-note' | 'ramp-drag' | 'select'
     let startX = null, startY = null;
     let dragIdx = null, startShift = null, startSmoothing = null;
     let resizeData = null; // { clusterIdx, edge, originalStart, originalEnd }
@@ -234,16 +253,23 @@ const PitchPlot = (() => {
     let panStartXRange = null, panStartYRange = null;
     let dragStartYRange = null;
     let hasMoved = false;
+    let rampDragData = null; // { clusterIdx, edge, startX, originalRampIn, originalRampOut }
     // SVG element refs cached at drag start for direct manipulation during drag
-    let _dragBoxSvgPaths = null; // all path elements in the box trace
-    let _dragLabelSvgEl  = null; // text element in the label trace
+    let _dragBoxSvgCache = []; // array of { paths, label, x0px, x1px } per selected cluster
+    let _dragBoxSvgPaths = null; // all path elements in the box trace (single drag fallback)
+    let _dragLabelSvgEl  = null; // text element in the label trace (single drag fallback)
     let _dragBoxX0px     = 0;    // box left edge in pixels (constant during vertical drag)
     let _dragBoxX1px     = 0;    // box right edge in pixels (constant during vertical drag)
+    // Multi-drag: per-cluster starting shifts
+    let _multiDragStartShifts = null; // Map(idx → shift)
+    // Rubber-band select start position
+    let _selectStartTime = null;
+    let _selectStartFreq = null;
 
     el.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
-      
-      // Check for Alt+click for draw mode
+
+      // 1. Alt+empty → draw-box
       if (e.altKey && _isInPlotArea(e, el)) {
         mode = 'draw-box';
         const rect = el.getBoundingClientRect();
@@ -259,9 +285,42 @@ const PitchPlot = (() => {
         e.stopImmediatePropagation();
         return;
       }
-      
-      // Check for Ctrl+click on cluster — smoothing drag (takes priority over resize)
+
+      // 2. Ctrl+Shift+empty → pan
+      if (e.ctrlKey && e.shiftKey && _isInPlotArea(e, el)) {
+        const clusterIdx = _getClusterAtMouse(e, el);
+        if (clusterIdx === null) {
+          mode = 'pan';
+          startX = e.clientX;
+          startY = e.clientY;
+          panStartXRange = [..._xRange];
+          panStartYRange = [..._yRange];
+          hasMoved = false;
+          el.style.cursor = 'grabbing';
+          e.preventDefault();
+          return;
+        }
+      }
+
+      // 3. Ctrl+edge → ramp-drag
       if (e.ctrlKey) {
+        const resizeEdge = _getResizeEdge(e, el);
+        if (resizeEdge) {
+          mode = 'ramp-drag';
+          const c = _clusters[resizeEdge.clusterIdx];
+          rampDragData = {
+            clusterIdx: resizeEdge.clusterIdx,
+            edge: resizeEdge.edge,
+            startX: e.clientX,
+            originalRampIn: c.ramp_in_ms || c.transition_ramp_ms || 100,
+            originalRampOut: c.ramp_out_ms || c.transition_ramp_ms || 100,
+          };
+          hasMoved = false;
+          e.preventDefault();
+          selectCluster(resizeEdge.clusterIdx);
+          return;
+        }
+        // 4. Ctrl+body → smooth-note
         const ctrlClusterIdx = _getClusterAtMouse(e, el);
         if (ctrlClusterIdx !== null) {
           mode = 'smooth-note';
@@ -275,7 +334,7 @@ const PitchPlot = (() => {
         }
       }
 
-      // Check for resize edge
+      // 5. Edge → resize-box
       const resizeEdge = _getResizeEdge(e, el);
       if (resizeEdge) {
         mode = 'resize-box';
@@ -291,58 +350,91 @@ const PitchPlot = (() => {
         e.preventDefault();
         return;
       }
-      
-      // Check for note drag
+
+      // 7. Shift+body → toggle cluster in/out of selection
       const clusterIdx = _getClusterAtMouse(e, el);
+      if (e.shiftKey && clusterIdx !== null) {
+        toggleCluster(clusterIdx);
+        e.preventDefault();
+        return;
+      }
+
+      // 6. Body → drag-note (drags all selected if target is in selection)
       if (clusterIdx !== null) {
+        // If cluster is NOT in selection, clear and select just this one
+        if (!_selectedIndices.has(clusterIdx)) {
+          selectCluster(clusterIdx);
+        }
+        // Now start drag for all selected clusters
         mode = 'drag-note';
         dragIdx = clusterIdx;
         startY = e.clientY;
-        startShift = _clusters[dragIdx].pitch_shift_semitones;
         dragStartYRange = [..._yRange];
         hasMoved = false;
         e.preventDefault();
-        selectCluster(dragIdx);
 
-        // Cache SVG elements and fixed X pixel positions for the drag.
-        // selectCluster() just called _redraw() so the DOM is fresh.
-        // During the drag we'll write directly to these elements instead of
-        // calling any Plotly function, making movement O(1) regardless of
-        // how many data points the pitch line contains.
-        const boxIdx   = _boxTraceIndex(dragIdx);
-        const labelIdx = boxIdx + 1;
-        const allTraceEls = el.querySelectorAll('.scatterlayer .trace');
-        if (allTraceEls.length > labelIdx) {
-          _dragBoxSvgPaths = allTraceEls[boxIdx].querySelectorAll('path');
-          _dragLabelSvgEl  = allTraceEls[labelIdx].querySelector('text');
+        // Store starting shifts for all selected clusters
+        _multiDragStartShifts = new Map();
+        for (const idx of _selectedIndices) {
+          _multiDragStartShifts.set(idx, _clusters[idx].pitch_shift_semitones);
         }
+        startShift = _clusters[dragIdx].pitch_shift_semitones;
+
+        // Cache SVG elements for all selected clusters
+        _dragBoxSvgCache = [];
+        const allTraceEls = el.querySelectorAll('.scatterlayer .trace');
         const layout = el._fullLayout;
+        for (const idx of _selectedIndices) {
+          const boxIdx   = _boxTraceIndex(idx);
+          const labelIdx = boxIdx + 1;
+          const entry = { paths: null, label: null, x0px: 0, x1px: 0 };
+          if (allTraceEls.length > labelIdx) {
+            entry.paths = allTraceEls[boxIdx].querySelectorAll('path');
+            entry.label = allTraceEls[labelIdx].querySelector('text');
+          }
+          if (layout) {
+            entry.x0px = layout.xaxis.d2p(_clusters[idx].start_time);
+            entry.x1px = layout.xaxis.d2p(_clusters[idx].end_time);
+          }
+          _dragBoxSvgCache.push({ idx, ...entry });
+        }
+        // Legacy single-drag refs for fallback
+        _dragBoxSvgPaths = null;
+        _dragLabelSvgEl  = null;
         if (layout) {
           _dragBoxX0px = layout.xaxis.d2p(_clusters[dragIdx].start_time);
           _dragBoxX1px = layout.xaxis.d2p(_clusters[dragIdx].end_time);
         }
-        
+
         // Start sine wave after 300ms delay
         const shiftFactor = Math.pow(2, startShift / 12);
         const correctedFreq = _clusters[dragIdx].mean_freq * shiftFactor;
         if (typeof SinePlayer !== 'undefined') {
+          const capturedClusterIdx = clusterIdx;
           const sineTimeout = setTimeout(() => {
-            if (mode === 'drag-note' && dragIdx === clusterIdx) {
+            if (mode === 'drag-note' && dragIdx === capturedClusterIdx) {
               SinePlayer.play(correctedFreq);
             }
           }, 300);
-          
-          // Store timeout so we can cancel it if mouse is released quickly
           _sineTimeout = sineTimeout;
         }
-      } else if (_isInPlotArea(e, el)) {
-        mode = 'pan';
+        return;
+      }
+
+      // 8. Empty space → rubber-band select
+      if (_isInPlotArea(e, el)) {
+        mode = 'select';
         startX = e.clientX;
         startY = e.clientY;
-        panStartXRange = [..._xRange];
-        panStartYRange = [..._yRange];
+        const rect = el.getBoundingClientRect();
+        const layout = el._fullLayout;
+        if (layout) {
+          const px = e.clientX - rect.left - layout.margin.l;
+          const py = e.clientY - rect.top - layout.margin.t;
+          _selectStartTime = layout.xaxis.p2d(px);
+          _selectStartFreq = layout.yaxis.p2d(py);
+        }
         hasMoved = false;
-        el.style.cursor = 'grabbing';
         e.preventDefault();
       }
     });
@@ -360,39 +452,47 @@ const PitchPlot = (() => {
         const baseCents = 1200 * Math.log2(
           (_clusters[dragIdx].mean_freq + freqDelta) / _clusters[dragIdx].mean_freq
         );
-        _clusters[dragIdx].pitch_shift_semitones = startShift + baseCents / 100;
-        
+        const semitoneDelta = baseCents / 100;
+
+        // Apply same semitone delta to all selected clusters
+        if (_multiDragStartShifts) {
+          for (const [idx, origShift] of _multiDragStartShifts) {
+            _clusters[idx].pitch_shift_semitones = origShift + (semitoneDelta - (startShift - origShift + semitoneDelta - semitoneDelta));
+            // Simplified: each cluster shifts by the same delta from its own start
+            _clusters[idx].pitch_shift_semitones = origShift + semitoneDelta;
+          }
+        }
+
         if (typeof SinePlayer !== 'undefined') {
           const shiftFactor = Math.pow(2, _clusters[dragIdx].pitch_shift_semitones / 12);
           const correctedFreq = _clusters[dragIdx].mean_freq * shiftFactor;
           SinePlayer.updateFrequency(correctedFreq);
         }
 
-        // Move the box via direct SVG writes - no Plotly call, no canvas repaint.
-        // Only Y changes during a vertical drag; X pixel positions were captured at mousedown.
-        if (_dragBoxSvgPaths || _dragLabelSvgEl) {
-          const layout = el._fullLayout;
-          if (layout) {
-            const c    = _clusters[dragIdx];
+        // Move all selected boxes via direct SVG writes
+        const layout = el._fullLayout;
+        if (layout && _dragBoxSvgCache.length > 0) {
+          const spacing = (_fullYRange[1] - _fullYRange[0]) / 30;
+          const h = spacing * 0.8;
+          for (const cached of _dragBoxSvgCache) {
+            const c    = _clusters[cached.idx];
             const freq = c.mean_freq + (c.pitch_shift_semitones * c.mean_freq * (Math.pow(2, 1/12) - 1));
-            const spacing = (dragStartYRange[1] - dragStartYRange[0]) / 30;
-            const h    = spacing * 0.8;
             const y0px = layout.yaxis.d2p(freq - h / 2);
             const y1px = layout.yaxis.d2p(freq + h / 2);
-            const d    = `M${_dragBoxX0px},${y0px}` +
-                         `L${_dragBoxX1px},${y0px}` +
-                         `L${_dragBoxX1px},${y1px}` +
-                         `L${_dragBoxX0px},${y1px}Z`;
-            if (_dragBoxSvgPaths) {
-              _dragBoxSvgPaths.forEach(p => p.setAttribute('d', d));
+            const d    = `M${cached.x0px},${y0px}` +
+                         `L${cached.x1px},${y0px}` +
+                         `L${cached.x1px},${y1px}` +
+                         `L${cached.x0px},${y1px}Z`;
+            if (cached.paths) {
+              cached.paths.forEach(p => p.setAttribute('d', d));
             }
-            if (_dragLabelSvgEl) {
-              _dragLabelSvgEl.setAttribute('y', layout.yaxis.d2p(freq));
+            if (cached.label) {
+              cached.label.setAttribute('y', layout.yaxis.d2p(freq));
             }
           }
         } else {
-          // Fallback if SVG refs weren't found (should not normally happen)
-          _redrawDragBox(dragIdx, dragStartYRange);
+          // Fallback if SVG refs weren't found
+          _redrawDragBox(dragIdx);
         }
 
       } else if (mode === 'smooth-note') {
@@ -403,6 +503,27 @@ const PitchPlot = (() => {
         const newSmoothing = Math.max(0, Math.min(100, startSmoothing + (dy / SMOOTH_PX_RANGE) * 100));
         _clusters[dragIdx].smoothing_percent = newSmoothing;
         if (_onClusterSmoothing) _onClusterSmoothing(dragIdx, newSmoothing);
+
+      } else if (mode === 'ramp-drag') {
+        const dx = e.clientX - rampDragData.startX;
+        if (Math.abs(dx) > 2) hasMoved = true;
+        if (!hasMoved) return;
+
+        // Convert pixel delta to time delta (ms)
+        const layout = el._fullLayout;
+        if (!layout) return;
+        const plotW = el.clientWidth - layout.margin.l - layout.margin.r;
+        const xSpan = _xRange[1] - _xRange[0];
+        const deltaMs = (dx / plotW) * xSpan * 1000 * 3;
+
+        const c = _clusters[rampDragData.clusterIdx];
+        if (rampDragData.edge === 'left') {
+          // Dragging left increases ramp_in, dragging right decreases
+          c.ramp_in_ms = Math.max(0, rampDragData.originalRampIn - deltaMs);
+        } else {
+          // Dragging right increases ramp_out, dragging left decreases
+          c.ramp_out_ms = Math.max(0, rampDragData.originalRampOut + deltaMs);
+        }
 
       } else if (mode === 'resize-box') {
         const dx = e.clientX - startX;
@@ -470,6 +591,36 @@ const PitchPlot = (() => {
 
         el.style.cursor = 'crosshair';
 
+      } else if (mode === 'select') {
+        const dx2 = e.clientX - startX;
+        const dy2 = e.clientY - startY;
+        if (Math.abs(dx2) > 2 || Math.abs(dy2) > 2) hasMoved = true;
+        if (!hasMoved) return;
+
+        // Draw rubber-band rectangle with distinct style
+        const rectS = el.getBoundingClientRect();
+        const layoutS = el._fullLayout;
+        if (layoutS) {
+          const pxS = e.clientX - rectS.left - layoutS.margin.l;
+          const pyS = e.clientY - rectS.top - layoutS.margin.t;
+          const currentTime = layoutS.xaxis.p2d(pxS);
+          const currentFreq = layoutS.yaxis.p2d(pyS);
+          const x0 = Math.min(_selectStartTime, currentTime);
+          const x1 = Math.max(_selectStartTime, currentTime);
+          const y0 = Math.min(_selectStartFreq, currentFreq);
+          const y1 = Math.max(_selectStartFreq, currentFreq);
+          Plotly.relayout(el, {
+            shapes: [{
+              type: 'rect',
+              xref: 'x', yref: 'y',
+              x0, x1, y0, y1,
+              fillcolor: 'rgba(255,255,255,0.06)',
+              line: { color: 'rgba(255,255,255,0.5)', width: 1, dash: 'dash' },
+              layer: 'above',
+            }],
+          });
+        }
+
       } else if (mode === 'pan') {
         const dx = e.clientX - startX;
         const dy = e.clientY - startY;
@@ -515,19 +666,22 @@ const PitchPlot = (() => {
       }
       
       if (mode === 'drag-note') {
+        _dragBoxSvgCache = [];
         _dragBoxSvgPaths = null;
         _dragLabelSvgEl  = null;
         if (hasMoved && _onClusterDrag) {
-          // Capture now - dragIdx and _clusters are nulled/mutated after this block.
-          // Deferring to the next animation frame lets the browser process the sine
-          // wave gain fade (SinePlayer.stop's setTimeout) before Plotly.react blocks
-          // the main thread during the pitch line redraw.
-          const capturedIdx   = dragIdx;
-          const capturedShift = _clusters[dragIdx].pitch_shift_semitones;
-          requestAnimationFrame(() => _onClusterDrag(capturedIdx, capturedShift));
+          // Fire onDrag for each selected cluster
+          const capturedIndices = Array.from(_selectedIndices);
+          const capturedShifts = capturedIndices.map(idx => _clusters[idx].pitch_shift_semitones);
+          requestAnimationFrame(() => {
+            for (let i = 0; i < capturedIndices.length; i++) {
+              _onClusterDrag(capturedIndices[i], capturedShifts[i]);
+            }
+          });
         }
         dragStartYRange = null;
-        
+        _multiDragStartShifts = null;
+
       } else if (mode === 'smooth-note') {
         if (hasMoved && _onClusterSmoothing) {
           const capturedIdx      = dragIdx;
@@ -535,6 +689,16 @@ const PitchPlot = (() => {
           requestAnimationFrame(() => _onClusterSmoothing(capturedIdx, capturedSmoothing));
         }
         startSmoothing = null;
+
+      } else if (mode === 'ramp-drag') {
+        if (hasMoved && _onClusterRampDrag) {
+          const capturedIdx = rampDragData.clusterIdx;
+          const c = _clusters[capturedIdx];
+          const capturedIn = c.ramp_in_ms;
+          const capturedOut = c.ramp_out_ms;
+          requestAnimationFrame(() => _onClusterRampDrag(capturedIdx, capturedIn, capturedOut));
+        }
+        rampDragData = null;
 
       } else if (mode === 'resize-box') {
         if (hasMoved && _onClusterResize) {
@@ -562,12 +726,58 @@ const PitchPlot = (() => {
         drawStartTime = null;
         el.style.cursor = '';
         
+      } else if (mode === 'select') {
+        if (hasMoved) {
+          // Find all clusters whose boxes intersect the rubber-band rectangle
+          const rectS = el.getBoundingClientRect();
+          const layoutS = el._fullLayout;
+          if (layoutS) {
+            const pxS = e.clientX - rectS.left - layoutS.margin.l;
+            const pyS = e.clientY - rectS.top - layoutS.margin.t;
+            const endTime = layoutS.xaxis.p2d(pxS);
+            const endFreq = layoutS.yaxis.p2d(pyS);
+            const selX0 = Math.min(_selectStartTime, endTime);
+            const selX1 = Math.max(_selectStartTime, endTime);
+            const selY0 = Math.min(_selectStartFreq, endFreq);
+            const selY1 = Math.max(_selectStartFreq, endFreq);
+
+            const spacing = (_fullYRange[1] - _fullYRange[0]) / 30;
+            const h = spacing * 0.8;
+            const intersecting = [];
+            for (let i = 0; i < _clusters.length; i++) {
+              const c = _clusters[i];
+              const freq = c.mean_freq + (c.pitch_shift_semitones * c.mean_freq * (Math.pow(2, 1/12) - 1));
+              const boxY0 = freq - h / 2;
+              const boxY1 = freq + h / 2;
+              // Check AABB intersection
+              if (c.start_time <= selX1 && c.end_time >= selX0 &&
+                  boxY0 <= selY1 && boxY1 >= selY0) {
+                intersecting.push(i);
+              }
+            }
+            if (intersecting.length > 0) {
+              selectClusters(intersecting);
+            } else {
+              _selectedIndices.clear();
+              _redraw();
+            }
+          }
+        } else {
+          // Click on empty space with no drag → clear selection
+          _selectedIndices.clear();
+          _redraw();
+        }
+        Plotly.relayout(el, { shapes: [] });
+        _selectStartTime = null;
+        _selectStartFreq = null;
+
       } else if (mode === 'pan') {
         el.style.cursor = '';
       }
-      
+
       mode = null; dragIdx = null; startX = null; startY = null;
-      startShift = null; startSmoothing = null; panStartXRange = null; panStartYRange = null; hasMoved = false;
+      startShift = null; startSmoothing = null; rampDragData = null; panStartXRange = null; panStartYRange = null; hasMoved = false;
+      _multiDragStartShifts = null;
     });
 
     // Smooth zoom using requestAnimationFrame
@@ -637,27 +847,41 @@ const PitchPlot = (() => {
     // Mousemove for cursor hints - attach to plot element
     el.addEventListener('mousemove', (e) => {
       if (mode) return;
-      
-      let newCursor = 'grab';
-      
+
+      let newCursor = 'default';
+
       const resizeEdge = _getResizeEdge(e, el);
       if (resizeEdge) {
+        // Show ew-resize for both normal resize and ctrl+edge (ramp drag)
         newCursor = 'ew-resize';
+      } else if (e.altKey && _isInPlotArea(e, el)) {
+        newCursor = 'crosshair';
+      } else if (e.ctrlKey && e.shiftKey) {
+        // Ctrl+Shift on empty space → grab (pan mode)
+        const clusterIdx = _getClusterAtMouse(e, el);
+        if (clusterIdx === null && _isInPlotArea(e, el)) {
+          newCursor = 'grab';
+        } else if (clusterIdx !== null) {
+          newCursor = 'ns-resize';
+        }
+      } else if (e.ctrlKey) {
+        const clusterIdx = _getClusterAtMouse(e, el);
+        if (clusterIdx !== null) {
+          newCursor = 'ns-resize'; // ctrl+body = smoothing
+        }
       } else {
         const clusterIdx = _getClusterAtMouse(e, el);
         if (clusterIdx !== null) {
           newCursor = 'ns-resize';
-        } else if (e.altKey && _isInPlotArea(e, el)) {
-          newCursor = 'crosshair';
         }
       }
-      
+
       // Set cursor on multiple elements to override Plotly
       el.style.cursor = newCursor;
       const dragLayer = el.querySelector('.nsewdrag');
       if (dragLayer) dragLayer.style.cursor = newCursor;
     });
-    
+
     // Global Alt key handlers for cursor feedback
     let altPressed = false;
     document.addEventListener('keydown', (e) => {
@@ -665,21 +889,21 @@ const PitchPlot = (() => {
         altPressed = true;
       }
     });
-    
+
     document.addEventListener('keyup', (e) => {
       if (e.key === 'Alt') {
         altPressed = false;
         if (!mode) {
-          el.style.cursor = 'grab';
+          el.style.cursor = 'default';
         }
       }
     });
   }
 
-  function _redraw(dragYRange) {
+  function _redraw() {
     const el = document.getElementById('pitchPlot');
     Plotly.react(el,
-      buildTraces(_times, _frequencies, _clusters, _midiNotes, _selectedIdx, dragYRange),
+      buildTraces(_times, _frequencies, _clusters, _midiNotes, _selectedIndices),
       buildLayout(_xRange, _yRange),
       { responsive: true, displayModeBar: false }
     );
@@ -691,10 +915,9 @@ const PitchPlot = (() => {
   // Fast path: update only the dragged box and its label during mousemove.
   // Avoids rebuilding and diffing the full trace list (including the entire pitch line)
   // on every mousemove event. Full _redraw() still runs on mouseup to sync everything.
-  function _redrawDragBox(clusterIdx, dragYRange) {
+  function _redrawDragBox(clusterIdx) {
     const el = document.getElementById('pitchPlot');
-    const yRangeForBoxes = dragYRange || _yRange;
-    const spacing = (yRangeForBoxes[1] - yRangeForBoxes[0]) / 30;
+    const spacing = (_fullYRange[1] - _fullYRange[0]) / 30;
     const h = spacing * 0.8;
     const c = _clusters[clusterIdx];
     const freq = c.mean_freq + (c.pitch_shift_semitones * c.mean_freq * (Math.pow(2, 1/12) - 1));
@@ -731,6 +954,7 @@ const PitchPlot = (() => {
     _onDrawBox = callbacks.onDrawBox;
     _onDeleteCluster = callbacks.onDelete;
     _onClusterSmoothing = callbacks.onSmoothing;
+    _onClusterRampDrag = callbacks.onRampDrag;
     const el = document.getElementById('pitchPlot');
     Plotly.newPlot(el, [], buildLayout(_xRange, _yRange), { 
       responsive: true, 
@@ -738,11 +962,9 @@ const PitchPlot = (() => {
       doubleClick: false,
       modeBarButtonsToRemove: ['select2d', 'lasso2d'],
     });
-    el.on('plotly_click', (data) => {
-      if (!data.points?.length) return;
-      const pt = data.points[0];
-      if (pt.customdata != null) selectCluster(pt.customdata);
-    });
+    // Cluster selection is handled entirely in _setupInteractions mousedown
+    // to support multi-select (Shift+click toggle). Plotly_click is disabled
+    // to avoid conflicts with the custom interaction model.
     _setupInteractions(el);
     document.getElementById('btnResetView')?.addEventListener('click', resetView);
     _findPlayheadSvg();
@@ -759,14 +981,43 @@ const PitchPlot = (() => {
       _fullXRange = [0, times[times.length - 1]];
       _xRange = [..._fullXRange];
     }
-    _selectedIdx = null;
+    _selectedIndices.clear();
     _redraw();
   }
 
   function selectCluster(idx) {
-    _selectedIdx = idx;
+    _selectedIndices.clear();
+    _selectedIndices.add(idx);
     _redraw();
     if (_onClusterSelect) _onClusterSelect(idx, _clusters[idx]);
+  }
+
+  function toggleCluster(idx) {
+    if (_selectedIndices.has(idx)) {
+      _selectedIndices.delete(idx);
+    } else {
+      _selectedIndices.add(idx);
+    }
+    _redraw();
+    // Fire callback with first selected cluster for panel update
+    const first = _selectedIndices.size > 0 ? _selectedIndices.values().next().value : null;
+    if (first !== null && _onClusterSelect) {
+      _onClusterSelect(first, _clusters[first]);
+    }
+  }
+
+  function selectClusters(idxArray) {
+    _selectedIndices.clear();
+    for (const idx of idxArray) _selectedIndices.add(idx);
+    _redraw();
+    const first = idxArray.length > 0 ? idxArray[0] : null;
+    if (first !== null && _onClusterSelect) {
+      _onClusterSelect(first, _clusters[first]);
+    }
+  }
+
+  function getSelectedIndices() {
+    return Array.from(_selectedIndices);
   }
 
   function updateCluster(idx, updates) {
@@ -806,10 +1057,22 @@ const PitchPlot = (() => {
     Plotly.restyle(el, { x: [_times], y: [_frequencies] }, [0]);
   }
 
+  function updateCorrectionCurve(curveTimes, curveFreqs) {
+    _correctionCurveTimes = curveTimes;
+    _correctionCurveFreqs = curveFreqs;
+    // Correction curve trace index: 1 + hasMidi
+    const hasMidi = _midiNotes.length > 0 ? 1 : 0;
+    const curveTraceIdx = 1 + hasMidi;
+    const el = document.getElementById('pitchPlot');
+    const tx = _showCorrectionCurve ? curveTimes : [];
+    const ty = _showCorrectionCurve ? curveFreqs : [];
+    Plotly.restyle(el, { x: [tx], y: [ty] }, [curveTraceIdx]);
+  }
+
   function deleteCluster(idx) {
     if (idx >= 0 && idx < _clusters.length) {
       _clusters.splice(idx, 1);
-      _selectedIdx = null;
+      _selectedIndices.clear();
       _redraw();
       if (_onDeleteCluster) {
         _onDeleteCluster(idx);
@@ -861,5 +1124,15 @@ const PitchPlot = (() => {
     Plotly.relayout(document.getElementById('pitchPlot'), { 'xaxis.range': _xRange });
   }
 
-  return { init, render, selectCluster, updateCluster, updatePitchSegment, updatePlayhead, resetView, syncXRange, deleteCluster };
+  function setShowMidi(show) {
+    _showMidi = show;
+    _redraw();
+  }
+
+  function setShowCorrectionCurve(show) {
+    _showCorrectionCurve = show;
+    _redraw();
+  }
+
+  return { init, render, selectCluster, toggleCluster, selectClusters, getSelectedIndices, updateCluster, updatePitchSegment, updateCorrectionCurve, updatePlayhead, resetView, syncXRange, deleteCluster, setShowMidi, setShowCorrectionCurve };
 })();

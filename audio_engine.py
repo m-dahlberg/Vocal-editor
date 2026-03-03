@@ -24,11 +24,14 @@ DEFAULT_FREQUENCY_TOLERANCE_CENTS = 100
 DEFAULT_MIN_NOTE_DURATION_MS = 100
 DEFAULT_MAX_GAP_TO_BRIDGE_MS = 500
 DEFAULT_SILENCE_THRESHOLD_DB = -30
-DEFAULT_TRANSITION_RAMP_MS = 300
+DEFAULT_TRANSITION_RAMP_MS = 100
 DEFAULT_GAP_THRESHOLD_MS = 150
 DEFAULT_CORRECTION_STRENGTH = 90
 DEFAULT_MIDI_THRESHOLD_CENTS = 80
 DEFAULT_SMOOTHING_PERCENT = 0
+DEFAULT_AUTOCORRECT_SMOOTHING = 0
+DEFAULT_SMOOTHING_THRESHOLD_CENTS = 0
+DEFAULT_SMOOTH_CURVE = 1.0
 DEFAULT_RUBBERBAND_COMMAND = "rubberband-r3"
 DEFAULT_RUBBERBAND_CRISP = 3
 DEFAULT_RUBBERBAND_FORMANT = True
@@ -345,13 +348,53 @@ def cluster_notes(times, frequencies, notes, audio, sr, params):
             c["mean_freq"] = float(np.mean(c["frequencies"]))
             c["duration_ms"] = dur_ms
             c["pitch_shift_semitones"] = 0.0
-            c["transition_ramp_ms"] = transition_ramp
+            c["ramp_in_ms"] = transition_ramp
+            c["ramp_out_ms"] = transition_ramp
             c["correction_strength"] = correction_strength
             c["smoothing_percent"] = DEFAULT_SMOOTHING_PERCENT
             c["manually_edited"] = False
+            c["pitch_variation_cents"] = compute_cluster_pitch_variation(c)
             result.append(c)
 
     return result
+
+
+def compute_cluster_pitch_variation(cluster):
+    """Average absolute cents deviation of each pitch frame from the cluster mean_freq."""
+    freqs = cluster.get("frequencies", [])
+    mean_freq = cluster.get("mean_freq", 0)
+    if not freqs or mean_freq <= 0:
+        return 0.0
+    deviations = []
+    for f in freqs:
+        if f is not None and not np.isnan(f) and f > 0:
+            deviations.append(abs(1200 * np.log2(f / mean_freq)))
+    return float(np.mean(deviations)) if deviations else 0.0
+
+
+def compute_avg_pitch_deviation(clusters, midi_notes, params):
+    """Average absolute cents deviation of each cluster from its best-matching MIDI note."""
+    midi_threshold = params.get("midi_threshold_cents", DEFAULT_MIDI_THRESHOLD_CENTS)
+    deviations = []
+    for cluster in clusters:
+        cluster_freq = cluster["mean_freq"]
+        best_midi = None
+        max_overlap = 0.0
+        for midi_note in midi_notes:
+            overlap = max(
+                0,
+                min(cluster["end_time"], midi_note["end_time"])
+                - max(cluster["start_time"], midi_note["start_time"]),
+            )
+            if overlap > max_overlap:
+                max_overlap = overlap
+                best_midi = midi_note
+        if best_midi is None or max_overlap == 0:
+            continue
+        cents_off = abs(hz_to_cents(cluster_freq, best_midi["frequency"]))
+        if cents_off is not None:
+            deviations.append(cents_off)
+    return float(np.mean(deviations)) if deviations else 0.0
 
 
 # ============================================
@@ -363,6 +406,8 @@ def autocorrect_midi(clusters, midi_notes, params):
     midi_threshold = params.get("midi_threshold_cents", DEFAULT_MIDI_THRESHOLD_CENTS)
     transition_ramp = params.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)
     correction_strength = params.get("correction_strength", DEFAULT_CORRECTION_STRENGTH)
+    autocorrect_smoothing = params.get("autocorrect_smoothing", DEFAULT_AUTOCORRECT_SMOOTHING)
+    smoothing_threshold = params.get("smoothing_threshold_cents", DEFAULT_SMOOTHING_THRESHOLD_CENTS)
 
     for cluster in clusters:
         if cluster.get("manually_edited"):
@@ -404,7 +449,13 @@ def autocorrect_midi(clusters, midi_notes, params):
         cents_off = hz_to_cents(cluster_freq, ideal_freq)
         strength = cluster.get("correction_strength", correction_strength) / 100.0
         cluster["pitch_shift_semitones"] = (-cents_off / 100.0) * strength
-        cluster["transition_ramp_ms"] = transition_ramp
+        cluster["ramp_in_ms"] = transition_ramp
+        cluster["ramp_out_ms"] = transition_ramp
+
+        # Apply smoothing if cluster pitch variation exceeds threshold
+        variation = cluster.get("pitch_variation_cents", 0)
+        if autocorrect_smoothing > 0 and variation >= smoothing_threshold:
+            cluster["smoothing_percent"] = autocorrect_smoothing
 
     return clusters
 
@@ -412,6 +463,8 @@ def autocorrect_midi(clusters, midi_notes, params):
 def autocorrect_standard(clusters, params):
     transition_ramp = params.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)
     correction_strength = params.get("correction_strength", DEFAULT_CORRECTION_STRENGTH)
+    autocorrect_smoothing = params.get("autocorrect_smoothing", DEFAULT_AUTOCORRECT_SMOOTHING)
+    smoothing_threshold = params.get("smoothing_threshold_cents", DEFAULT_SMOOTHING_THRESHOLD_CENTS)
 
     for cluster in clusters:
         if cluster.get("manually_edited"):
@@ -422,7 +475,13 @@ def autocorrect_standard(clusters, params):
         cents_off = hz_to_cents(cluster["mean_freq"], ideal_freq)
         strength = cluster.get("correction_strength", correction_strength) / 100.0
         cluster["pitch_shift_semitones"] = (-cents_off / 100.0) * strength
-        cluster["transition_ramp_ms"] = transition_ramp
+        cluster["ramp_in_ms"] = transition_ramp
+        cluster["ramp_out_ms"] = transition_ramp
+
+        # Apply smoothing if cluster pitch variation exceeds threshold
+        variation = cluster.get("pitch_variation_cents", 0)
+        if autocorrect_smoothing > 0 and variation >= smoothing_threshold:
+            cluster["smoothing_percent"] = autocorrect_smoothing
 
     return clusters
 
@@ -432,11 +491,17 @@ def autocorrect_standard(clusters, params):
 # ============================================
 
 
-def _compute_smoothed_frames(cluster, sr):
+def _compute_smoothed_frames(cluster, sr, smooth_curve=1.0):
     """
     Compute per-frame (frame, total_shift_semitones) pairs for a cluster with smoothing.
     The total shift at each frame is pitch_shift_semitones + smoothing_shift, where
     smoothing_shift pulls the frame deviation from mean_freq toward zero.
+
+    smooth_curve controls how smoothing is distributed across deviations:
+      1.0 = linear (uniform reduction),
+      >1  = power curve (outliers corrected more, near-center points left alone).
+    Formula: smoothed = sign(d) * (|d|/max_dev)^(1/curve) * max_dev * (1-smoothing)
+
     NaN frames are interpolated between neighbouring voiced frames.
     Returns list of (frame, shift) tuples.
     """
@@ -464,8 +529,19 @@ def _compute_smoothed_frames(cluster, sr):
     smoothing = cluster.get("smoothing_percent", 0) / 100.0
     print(
         f"[DEBUG] _compute_smoothed_frames: note={cluster.get('note')} smoothing={smoothing:.2f} "
-        f"base_shift={base_shift:.3f} frames={len(times)}"
+        f"smooth_curve={smooth_curve:.2f} base_shift={base_shift:.3f} frames={len(times)}"
     )
+
+    # Pre-compute max deviation for power curve normalization
+    max_dev = 0.0
+    if smooth_curve > 1.0:
+        for f in freqs:
+            if f is not None and not (isinstance(f, float) and np.isnan(f)) and f > 0:
+                dev = abs(12.0 * np.log2(f / mean_freq))
+                if dev > max_dev:
+                    max_dev = dev
+        if max_dev == 0:
+            max_dev = 1.0  # avoid division by zero
 
     raw = []
     for t, f in zip(times, freqs):
@@ -473,16 +549,18 @@ def _compute_smoothed_frames(cluster, sr):
         if f is None or (isinstance(f, float) and np.isnan(f)) or f <= 0:
             raw.append((frame, None))
         else:
-            # Reduce per-frame deviation from mean_freq in semitone space, then
-            # add the correction/drag shift on top.  This keeps smoothing independent
-            # of pitch_shift_semitones so it never pulls toward the chromatic reference.
             deviation_semitones = 12.0 * np.log2(f / mean_freq)
-            smoothed_deviation = deviation_semitones * (1.0 - smoothing)
-            # The shift rubberband must apply to the original frequency f:
-            #   target = mean_freq * 2^((smoothed_deviation + base_shift) / 12)
-            #   f * 2^(frame_shift / 12) = target
-            #   => frame_shift = (smoothed_deviation - deviation_semitones) + base_shift
-            #                  = -deviation_semitones * smoothing + base_shift
+
+            if smooth_curve <= 1.0 or max_dev == 0:
+                # Linear smoothing (original behavior)
+                smoothed_deviation = deviation_semitones * (1.0 - smoothing)
+            else:
+                # Power curve: remaining = sign(d) * (|d|/max)^(1/curve) * max * (1-smoothing)
+                abs_dev = abs(deviation_semitones)
+                norm = abs_dev / max_dev
+                curved_norm = norm ** (1.0 / smooth_curve)
+                smoothed_deviation = np.sign(deviation_semitones) * curved_norm * max_dev * (1.0 - smoothing)
+
             frame_shift = (smoothed_deviation - deviation_semitones) + base_shift
             raw.append((frame, frame_shift))
 
@@ -555,7 +633,7 @@ def generate_pitch_map_from_frames(
     return sorted(pitch_map, key=lambda x: x[0])
 
 
-def generate_pitch_map(clusters, sr, audio_length, gap_threshold_ms=None):
+def generate_pitch_map(clusters, sr, audio_length, gap_threshold_ms=None, smooth_curve=1.0):
     if gap_threshold_ms is None:
         gap_threshold_ms = DEFAULT_GAP_THRESHOLD_MS
 
@@ -577,7 +655,14 @@ def generate_pitch_map(clusters, sr, audio_length, gap_threshold_ms=None):
         end_frame = int(cluster["end_time"] * sr)
         base_shift = cluster["pitch_shift_semitones"]
         smoothing = cluster.get("smoothing_percent", 0)
-        half_ramp = int((cluster["transition_ramp_ms"] / 2000.0) * sr)
+        half_ramp_in = int((cluster.get("ramp_in_ms", cluster.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)) / 2000.0) * sr)
+        half_ramp_out = int((cluster.get("ramp_out_ms", cluster.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)) / 2000.0) * sr)
+        # Clamp ramps so they never overlap inside the cluster
+        cluster_frames = end_frame - start_frame
+        if half_ramp_in + half_ramp_out > cluster_frames and cluster_frames > 0:
+            scale = cluster_frames / (half_ramp_in + half_ramp_out)
+            half_ramp_in = int(half_ramp_in * scale)
+            half_ramp_out = int(half_ramp_out * scale)
 
         prev = corrected[idx - 1][1] if idx > 0 else None
         nxt = corrected[idx + 1][1] if idx < len(corrected) - 1 else None
@@ -590,7 +675,7 @@ def generate_pitch_map(clusters, sr, audio_length, gap_threshold_ms=None):
         )
 
         if smoothing > 0:
-            frames = _compute_smoothed_frames(cluster, sr)
+            frames = _compute_smoothed_frames(cluster, sr, smooth_curve)
             # Upsample to finer grid so rubberband's linear interpolation
             # can accurately follow the correction curve.
             if len(frames) >= 2:
@@ -612,46 +697,46 @@ def generate_pitch_map(clusters, sr, audio_length, gap_threshold_ms=None):
                 f"[DEBUG] generate_pitch_map: note={cluster.get('note')} smoothing=0 — flat hold"
             )
 
-        # For smoothing: ramps connect from outside the cluster to the first/last frame.
-        # For flat: ramps connect from outside to base_shift.
-        first_shift = frames[0][1] if frames else base_shift
-        last_shift = frames[-1][1] if frames else base_shift
-        first_frame = frames[0][0] if frames else start_frame + half_ramp
-        last_frame = frames[-1][0] if frames else end_frame - half_ramp
+        # Ramp endpoints are always at the same positions and target base_shift,
+        # regardless of whether smoothing is active.  This keeps transition
+        # behaviour consistent — smoothing only affects the interior.
+        ramp_in_end = start_frame + half_ramp_in
+        ramp_out_start = end_frame - half_ramp_out
 
-        # Ramp in: from prev_shift (or 0) outside cluster up to first interior point
+        # Ramp in: from prev_shift (or 0) outside cluster up to base_shift
         prev_shift = (
             prev["pitch_shift_semitones"]
             if (prev and gap_prev < gap_threshold_ms)
             else 0.0
         )
         if gap_prev < gap_threshold_ms:
-            pitch_map.append((max(0, start_frame - half_ramp), prev_shift))
+            pitch_map.append((max(0, start_frame - half_ramp_in), prev_shift))
         else:
-            pitch_map.append((max(0, start_frame - half_ramp - 1), 0.0))
-            pitch_map.append((max(0, start_frame - half_ramp), 0.0))
-        pitch_map.append((first_frame, first_shift))
+            pitch_map.append((max(0, start_frame - half_ramp_in - 1), 0.0))
+            pitch_map.append((max(0, start_frame - half_ramp_in), 0.0))
+        pitch_map.append((ramp_in_end, base_shift))
 
-        # Interior: per-frame smoothing points, or flat hold
+        # Interior: per-frame smoothing points between ramp boundaries, or flat hold
         if smoothing > 0 and frames:
             for frame, shift in frames:
-                pitch_map.append((frame, shift))
+                if frame >= ramp_in_end and frame <= ramp_out_start:
+                    pitch_map.append((frame, shift))
         else:
-            pitch_map.append((first_frame, base_shift))
-            pitch_map.append((last_frame, base_shift))
+            pitch_map.append((ramp_in_end, base_shift))
+            pitch_map.append((ramp_out_start, base_shift))
 
-        # Ramp out: from last interior point to next_shift (or 0) outside cluster
+        # Ramp out: from base_shift to next_shift (or 0) outside cluster
         nxt_shift = (
             nxt["pitch_shift_semitones"]
             if (nxt and gap_next < gap_threshold_ms)
             else 0.0
         )
-        pitch_map.append((last_frame, last_shift))
+        pitch_map.append((ramp_out_start, base_shift))
         if gap_next < gap_threshold_ms:
-            pitch_map.append((end_frame + half_ramp, nxt_shift))
+            pitch_map.append((end_frame + half_ramp_out, nxt_shift))
         else:
-            pitch_map.append((end_frame + half_ramp, 0.0))
-            pitch_map.append((min(total_frames - 1, end_frame + half_ramp + 1), 0.0))
+            pitch_map.append((end_frame + half_ramp_out, 0.0))
+            pitch_map.append((min(total_frames - 1, end_frame + half_ramp_out + 1), 0.0))
 
     pitch_map.append((total_frames - 1, 0.0))
     return sorted(pitch_map, key=lambda x: x[0])
@@ -817,7 +902,8 @@ def process_full_audio(audio, sr, clusters, params, output_path):
     audio_length = len(audio_mono)
 
     gap_threshold = params.get("gap_threshold_ms", DEFAULT_GAP_THRESHOLD_MS)
-    pitch_map = generate_pitch_map(clusters, sr, audio_length, gap_threshold)
+    smooth_curve = params.get("smooth_curve", DEFAULT_SMOOTH_CURVE)
+    pitch_map = generate_pitch_map(clusters, sr, audio_length, gap_threshold, smooth_curve)
 
     rb_params = params.get("rb", {})
     success, msg = run_rubberband(audio_mono, sr, pitch_map, output_path, rb_params)
@@ -845,21 +931,28 @@ def process_segment(audio, sr, clusters, cluster_idx, params, corrected_audio_pa
     # Build pitch map relative to segment
     seg_length = len(segment)
     shift = cluster["pitch_shift_semitones"]
-    half_ramp = int((cluster["transition_ramp_ms"] / 2000.0) * sr)
+    half_ramp_in = int((cluster.get("ramp_in_ms", cluster.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)) / 2000.0) * sr)
+    half_ramp_out = int((cluster.get("ramp_out_ms", cluster.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)) / 2000.0) * sr)
 
     # Convert cluster times to segment-relative frames
     start_frame = int((cluster["start_time"] - seg_start) * sr)
     end_frame = int((cluster["end_time"] - seg_start) * sr)
     start_frame = max(0, start_frame)
     end_frame = min(seg_length - 1, end_frame)
+    # Clamp ramps so they never overlap inside the cluster
+    cluster_frames = end_frame - start_frame
+    if half_ramp_in + half_ramp_out > cluster_frames and cluster_frames > 0:
+        scale = cluster_frames / (half_ramp_in + half_ramp_out)
+        half_ramp_in = int(half_ramp_in * scale)
+        half_ramp_out = int(half_ramp_out * scale)
 
     pitch_map = [
         (0, 0.0),
-        (max(0, start_frame - half_ramp - 1), 0.0),
-        (max(0, start_frame - half_ramp), 0.0),
-        (min(seg_length - 1, start_frame + half_ramp), shift),
-        (max(0, end_frame - half_ramp), shift),
-        (min(seg_length - 1, end_frame + half_ramp), 0.0),
+        (max(0, start_frame - half_ramp_in - 1), 0.0),
+        (max(0, start_frame - half_ramp_in), 0.0),
+        (min(seg_length - 1, start_frame + half_ramp_in), shift),
+        (max(0, end_frame - half_ramp_out), shift),
+        (min(seg_length - 1, end_frame + half_ramp_out), 0.0),
         (seg_length - 1, 0.0),
     ]
     pitch_map = sorted(set(pitch_map), key=lambda x: x[0])
@@ -949,9 +1042,11 @@ def clusters_to_json(clusters):
                 "mean_freq": c["mean_freq"],
                 "duration_ms": c["duration_ms"],
                 "pitch_shift_semitones": c["pitch_shift_semitones"],
-                "transition_ramp_ms": c["transition_ramp_ms"],
+                "ramp_in_ms": c.get("ramp_in_ms", c.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)),
+                "ramp_out_ms": c.get("ramp_out_ms", c.get("transition_ramp_ms", DEFAULT_TRANSITION_RAMP_MS)),
                 "correction_strength": c["correction_strength"],
                 "smoothing_percent": c["smoothing_percent"],
+                "pitch_variation_cents": c.get("pitch_variation_cents", 0),
                 "manually_edited": c.get("manually_edited", False),
             }
         )

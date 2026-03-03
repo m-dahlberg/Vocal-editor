@@ -60,6 +60,13 @@ header h1 {
   color: var(--text-dim);
 }
 
+.overlay-toggles {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
 /* ---- LAYOUT ---- */
 .main-layout {
   display: flex;
@@ -210,10 +217,30 @@ section h3 {
   border-color: var(--accent2);
 }
 
-#btnApplyCluster {
-  margin-top: 12px;
-  width: 100%;
+.slider-input-pair {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
+
+.slider-input-pair input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent2);
+  height: 4px;
+}
+
+.slider-input-pair input[type="number"] {
+  width: 60px;
+  flex-shrink: 0;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 0.82rem;
+}
+
 
 /* ---- CENTER PANEL ---- */
 .center-panel {
