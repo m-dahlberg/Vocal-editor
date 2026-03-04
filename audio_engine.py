@@ -31,6 +31,7 @@ DEFAULT_MIDI_THRESHOLD_CENTS = 80
 DEFAULT_SMOOTHING_PERCENT = 0
 DEFAULT_AUTOCORRECT_SMOOTHING = 0
 DEFAULT_SMOOTHING_THRESHOLD_CENTS = 0
+DEFAULT_SMOOTHING_THRESHOLD_MS = 0
 DEFAULT_SMOOTH_CURVE = 1.0
 DEFAULT_RUBBERBAND_COMMAND = "rubberband-r3"
 DEFAULT_RUBBERBAND_CRISP = 3
@@ -408,6 +409,7 @@ def autocorrect_midi(clusters, midi_notes, params):
     correction_strength = params.get("correction_strength", DEFAULT_CORRECTION_STRENGTH)
     autocorrect_smoothing = params.get("autocorrect_smoothing", DEFAULT_AUTOCORRECT_SMOOTHING)
     smoothing_threshold = params.get("smoothing_threshold_cents", DEFAULT_SMOOTHING_THRESHOLD_CENTS)
+    smoothing_threshold_ms = params.get("smoothing_threshold_ms", DEFAULT_SMOOTHING_THRESHOLD_MS)
 
     for cluster in clusters:
         if cluster.get("manually_edited"):
@@ -452,9 +454,12 @@ def autocorrect_midi(clusters, midi_notes, params):
         cluster["ramp_in_ms"] = transition_ramp
         cluster["ramp_out_ms"] = transition_ramp
 
-        # Apply smoothing if cluster pitch variation exceeds threshold
+        # Apply smoothing if cluster meets both thresholds (cents and duration)
         variation = cluster.get("pitch_variation_cents", 0)
-        if autocorrect_smoothing > 0 and variation >= smoothing_threshold:
+        duration_ms = cluster.get("duration_ms", 0)
+        if (autocorrect_smoothing > 0
+                and variation >= smoothing_threshold
+                and duration_ms >= smoothing_threshold_ms):
             cluster["smoothing_percent"] = autocorrect_smoothing
 
     return clusters
@@ -465,6 +470,7 @@ def autocorrect_standard(clusters, params):
     correction_strength = params.get("correction_strength", DEFAULT_CORRECTION_STRENGTH)
     autocorrect_smoothing = params.get("autocorrect_smoothing", DEFAULT_AUTOCORRECT_SMOOTHING)
     smoothing_threshold = params.get("smoothing_threshold_cents", DEFAULT_SMOOTHING_THRESHOLD_CENTS)
+    smoothing_threshold_ms = params.get("smoothing_threshold_ms", DEFAULT_SMOOTHING_THRESHOLD_MS)
 
     for cluster in clusters:
         if cluster.get("manually_edited"):
@@ -478,9 +484,12 @@ def autocorrect_standard(clusters, params):
         cluster["ramp_in_ms"] = transition_ramp
         cluster["ramp_out_ms"] = transition_ramp
 
-        # Apply smoothing if cluster pitch variation exceeds threshold
+        # Apply smoothing if cluster meets both thresholds (cents and duration)
         variation = cluster.get("pitch_variation_cents", 0)
-        if autocorrect_smoothing > 0 and variation >= smoothing_threshold:
+        duration_ms = cluster.get("duration_ms", 0)
+        if (autocorrect_smoothing > 0
+                and variation >= smoothing_threshold
+                and duration_ms >= smoothing_threshold_ms):
             cluster["smoothing_percent"] = autocorrect_smoothing
 
     return clusters

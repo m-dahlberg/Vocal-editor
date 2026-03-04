@@ -229,11 +229,15 @@ def sync_clusters():
         end_time   = float(c['end_time'])
 
         # Slice pitch frames from original analysis that fall within this cluster
+        # Use binary search since times is sorted
+        i_start = np.searchsorted(times, start_time, side='left')
+        i_end = np.searchsorted(times, end_time, side='right')
         cluster_times = []
         cluster_freqs = []
-        for t, f in zip(times, frequencies):
-            if t >= start_time and t <= end_time and not np.isnan(f) and f > 0:
-                cluster_times.append(float(t))
+        for j in range(i_start, i_end):
+            f = frequencies[j]
+            if not np.isnan(f) and f > 0:
+                cluster_times.append(float(times[j]))
                 cluster_freqs.append(float(f))
 
         # Use client-sent mean_freq — this is what the user sees as the note center.
@@ -289,7 +293,30 @@ def sync_clusters():
         corrected, _ = sf.read(SESSION['corrected_path'])
         SESSION['corrected_audio'] = get_audio_mono(corrected) if len(corrected.shape) > 1 else corrected
 
-        return jsonify({'ok': True, 'clusters': clusters_to_json(SESSION['clusters'])})
+        # Analyze corrected audio pitch in one pass (avoids N separate analyzeSegment calls)
+        corrected_times = None
+        corrected_freqs = None
+        try:
+            time_step = SESSION['params'].get('time_resolution_ms', 20) / 1000.0
+            min_freq = SESSION['params'].get('min_frequency', 75)
+            max_freq = SESSION['params'].get('max_frequency', 600)
+            snd = parselmouth.Sound(SESSION['corrected_audio'], sampling_frequency=SESSION['sr'])
+            pitch = call(snd, "To Pitch", time_step, min_freq, max_freq)
+            time_values = pitch.xs()
+            freqs = []
+            for t in time_values:
+                f0 = call(pitch, "Get value at time", t, "Hertz", "Linear")
+                freqs.append(float(f0) if (f0 is not None and not np.isnan(f0) and f0 > 0) else None)
+            corrected_times = time_values.tolist()
+            corrected_freqs = freqs
+        except Exception as e:
+            print(f"[WARN] corrected audio analysis failed: {e}")
+
+        resp = {'ok': True, 'clusters': clusters_to_json(SESSION['clusters'])}
+        if corrected_times is not None:
+            resp['corrected_times'] = corrected_times
+            resp['corrected_freqs'] = corrected_freqs
+        return jsonify(resp)
 
     except Exception as e:
         import traceback

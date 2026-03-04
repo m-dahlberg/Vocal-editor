@@ -48,6 +48,7 @@ const App = (() => {
       midi_threshold_cents:      n('p_midi_threshold_cents'),
       autocorrect_smoothing:     n('p_autocorrect_smoothing'),
       smoothing_threshold_cents: n('p_smoothing_threshold_cents'),
+      smoothing_threshold_ms:    n('p_smoothing_threshold_ms'),
       smooth_curve:             n('p_smooth_curve'),
       rb: {
         command:     s('p_rb_command'),
@@ -654,6 +655,84 @@ const App = (() => {
     PitchPlot.updateCorrectionCurve(times, cents);
   }
 
+  // Single-pass update of the entire pitch curve — O(T × C) instead of O(C × T × C).
+  // Used after bulk operations (e.g. auto-correct) to avoid per-cluster updates + redraws.
+  function updateAllPitchCurves() {
+    const newTimes = [];
+    const newFreqs = [];
+    const smoothCurve = parseFloat(document.getElementById('p_smooth_curve').value) || 1.0;
+
+    // Precompute max deviation per cluster for power curve smoothing
+    const clusterMaxDevCache = new Map();
+    if (smoothCurve > 1.0) {
+      for (const c of _state.clusters) {
+        if (!c.smoothing_percent) continue;
+        let maxDev = 0;
+        for (let j = 0; j < _state.originalTimes.length; j++) {
+          const tj = _state.originalTimes[j];
+          const fj = _state.originalFrequencies[j];
+          if (tj >= c.start_time && tj <= c.end_time && fj && !isNaN(fj)) {
+            const dev = Math.abs(12 * Math.log2(fj / c.mean_freq));
+            if (dev > maxDev) maxDev = dev;
+          }
+        }
+        clusterMaxDevCache.set(c, maxDev || 1);
+      }
+    }
+
+    // Build sorted cluster lookup for O(log n) ownership checks
+    const sortedClusters = [..._state.clusters].sort((a, b) => a.start_time - b.start_time);
+
+    for (let i = 0; i < _state.originalTimes.length; i++) {
+      const t     = _state.originalTimes[i];
+      const origF = _state.originalFrequencies[i];
+
+      newTimes.push(t);
+
+      if (origF === null || isNaN(origF)) {
+        newFreqs.push(null);
+        continue;
+      }
+
+      const shiftedF = origF * Math.pow(2, computeShiftAtTime(t) / 12);
+
+      // Binary search for owning cluster
+      let owningCluster = null;
+      let lo = 0, hi = sortedClusters.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const sc = sortedClusters[mid];
+        if (t < sc.start_time) { hi = mid - 1; }
+        else if (t > sc.end_time) { lo = mid + 1; }
+        else { owningCluster = sc; break; }
+      }
+
+      if (owningCluster && owningCluster.smoothing_percent > 0) {
+        const smoothing          = owningCluster.smoothing_percent / 100;
+        const deviationSemitones = 12 * Math.log2(origF / owningCluster.mean_freq);
+        const correctionShift    = owningCluster.pitch_shift_semitones;
+
+        let smoothedDeviation;
+        if (smoothCurve <= 1.0) {
+          smoothedDeviation = deviationSemitones * (1 - smoothing);
+        } else {
+          const maxDev = clusterMaxDevCache.get(owningCluster) || 1;
+          const absDev = Math.abs(deviationSemitones);
+          const norm = absDev / maxDev;
+          const curvedNorm = Math.pow(norm, 1.0 / smoothCurve);
+          smoothedDeviation = Math.sign(deviationSemitones) * curvedNorm * maxDev * (1 - smoothing);
+        }
+
+        newFreqs.push(owningCluster.mean_freq * Math.pow(2, (smoothedDeviation + correctionShift) / 12));
+      } else {
+        newFreqs.push(shiftedF);
+      }
+    }
+
+    // Single Plotly update for the entire pitch line
+    PitchPlot.updatePitchSegment(newTimes, newFreqs, -Infinity, Infinity);
+  }
+
   function updatePitchCurveForCluster(idx) {
     const cluster      = _state.clusters[idx];
     const buffer       = 0.3;
@@ -772,20 +851,13 @@ const App = (() => {
       // Re-sync PitchPlot's internal cluster references to the freshly baked state.
       PitchPlot.render(null, null, _state.clusters, null);
 
-      // Re-analyze pitch for each cluster so the plot shows actual corrected pitch.
-      const buffer = 0.3;
-      for (const cluster of _state.clusters) {
-        if (!cluster) continue;
-        const segResult = await API.analyzeSegment(
-          cluster.start_time - buffer,
-          cluster.end_time   + buffer
+      // Update pitch curve from the corrected audio analysis returned in the response
+      // (single Parselmouth pass on server, no extra HTTP calls needed).
+      if (result.corrected_times && result.corrected_freqs) {
+        PitchPlot.updatePitchSegment(
+          result.corrected_times, result.corrected_freqs,
+          -Infinity, Infinity
         );
-        if (segResult.ok) {
-          PitchPlot.updatePitchSegment(
-            segResult.times, segResult.frequencies,
-            segResult.start_time, segResult.end_time
-          );
-        }
       }
 
       Waveform.load(API.audioUrl());
@@ -880,9 +952,9 @@ const App = (() => {
       // Update cluster boxes
       PitchPlot.render(null, null, result.clusters, null);
 
-      // Update pitch curve for every cluster and mark all dirty
+      // Single-pass pitch curve update + mark all dirty
+      updateAllPitchCurves();
       for (let i = 0; i < _state.clusters.length; i++) {
-        updatePitchCurveForCluster(i);
         _state.dirtyClusters.add(i);
       }
       generateCorrectionCurve();
