@@ -539,4 +539,5 @@ def update_cluster():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    host = os.environ.get('FLASK_HOST', '127.0.0.1')
+    app.run(debug=True, host=host, port=5000)

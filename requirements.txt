@@ -1,5 +1,5 @@
 flask
 numpy
 soundfile
-parselmouth
+praat-parselmouth
 mido

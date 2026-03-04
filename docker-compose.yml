@@ -1,0 +1,11 @@
+services:
+  vocal-editor:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - vocal-editor-tmp:/tmp/vocal_editor
+    restart: unless-stopped
+
+volumes:
+  vocal-editor-tmp:
