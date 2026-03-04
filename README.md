@@ -4,7 +4,7 @@ A web-based vocal pitch correction application. Upload vocal audio, analyze pitc
 
 ![Screenshot placeholder](docs/screenshot.png)
 
-## Features
+## Features!
 
 - **Automatic pitch analysis** using Parselmouth/Praat (75–600 Hz range)
 - **Note clustering** — detected pitches grouped into musical notes with vibrato tolerance
