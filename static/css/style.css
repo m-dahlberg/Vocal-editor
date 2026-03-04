@@ -399,6 +399,136 @@ section h3 {
   color: var(--text);
 }
 
+/* ---- HELP LIGHTBOX ---- */
+.help-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.help-overlay.hidden { display: none; }
+
+.help-lightbox {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 720px;
+  max-width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.help-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.help-header h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+  border: none;
+  padding: 0;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.help-close {
+  font-size: 1.4rem;
+  line-height: 1;
+  padding: 2px 8px;
+}
+
+.help-body {
+  padding: 20px 24px;
+  overflow-y: auto;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.help-body h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--accent2);
+  margin: 24px 0 10px 0;
+  padding: 0;
+  border: none;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.help-body h2:first-child { margin-top: 0; }
+
+.help-body h3 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 16px 0 6px 0;
+}
+
+.help-body p {
+  margin: 6px 0;
+}
+
+.help-body ul, .help-body ol {
+  margin: 6px 0 6px 20px;
+}
+
+.help-body li {
+  margin: 4px 0;
+}
+
+.help-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 18px 0;
+}
+
+.help-body code {
+  background: var(--bg3);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.84rem;
+}
+
+.help-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 0.84rem;
+}
+
+.help-body th {
+  text-align: left;
+  padding: 6px 10px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--accent2);
+  font-weight: 600;
+}
+
+.help-body td {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.help-body strong {
+  color: #fff;
+}
+
 /* ---- SCROLLBARS ---- */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
