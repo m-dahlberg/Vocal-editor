@@ -1,0 +1,6 @@
+flask
+flask-cors
+numpy
+soundfile
+praat-parselmouth
+mido

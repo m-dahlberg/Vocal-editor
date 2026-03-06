@@ -1,10 +1,20 @@
 services:
-  vocal-editor:
-    build: .
+  backend:
+    build: ./backend
     ports:
       - "5000:5000"
     volumes:
       - vocal-editor-tmp:/tmp/vocal_editor
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - API_BACKEND=http://backend:5000
+    depends_on:
+      - backend
     restart: unless-stopped
 
 volumes:
