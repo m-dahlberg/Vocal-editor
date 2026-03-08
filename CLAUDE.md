@@ -9,31 +9,41 @@ Vocal pitch correction web application. Users upload vocal audio, analyze pitch,
 ## Running the App
 
 ```bash
-pip install -r requirements.txt
-python app.py
-# Opens at http://localhost:5000
+docker compose up --build
+# Frontend at http://localhost:3000
+# Backend at http://localhost:5000
 ```
 
-**System dependency:** `rubberband-r3` CLI tool must be installed (`sudo apt-get install rubberband-cli`).
+## After Making Changes
+
+**Always rebuild and restart the affected service(s) before returning to the user**, so the latest changes are live:
+
+```bash
+# Rebuild and restart a specific service
+docker compose up --build frontend
+docker compose up --build backend
+
+# Or rebuild both
+docker compose up --build
+```
 
 ## Architecture
 
-**Backend:** Flask (app.py) → Audio Engine (audio_engine.py) → Rubberband CLI subprocess
+**Backend:** `backend/` — Flask (app.py) → Audio Engine (audio_engine.py) → Rubberband CLI subprocess
 
-**Frontend:** Vanilla JS modules (no framework), Plotly.js for pitch visualization, WaveSurfer.js for waveform playback.
+**Frontend:** `frontend/` — SvelteKit + TypeScript, Plotly.js for pitch visualization, WaveSurfer.js for waveform playback. Proxies all `/api/*` requests to the backend via `hooks.server.ts`.
 
 ### Backend
 
-- `app.py` — Flask routes, session management, file handling. Single-user in-memory `SESSION` dict holds all state.
-- `audio_engine.py` — Pitch analysis (Parselmouth/Praat), note clustering by semitone, pitch correction algorithms (MIDI-aware, standard, smoothing), pitch map generation, Rubberband wrapper.
+- `backend/app.py` — Flask routes, session management, file handling. Single-user in-memory `SESSION` dict holds all state.
+- `backend/audio_engine.py` — Pitch analysis (Parselmouth/Praat), note clustering by semitone, pitch correction algorithms (MIDI-aware, standard, smoothing), pitch map generation, Rubberband wrapper.
 
 ### Frontend Modules
 
-- `main.js` — App state coordination, user interaction handling, cluster management
-- `pitch_plot.js` — Plotly-based pitch visualization with draggable note boxes, MIDI overlay, correction curves
-- `waveform.js` — WaveSurfer.js integration for audio playback with synchronized playhead
-- `sine_player.js` — Web Audio API sine tone preview
-- `api.js` — Fetch-based HTTP client for all backend calls
+- `src/hooks.server.ts` — Proxies `/api/*` requests to the Flask backend (`API_BACKEND` env var)
+- `src/lib/api.ts` — Fetch-based HTTP client for all backend calls
+- `src/lib/components/` — Svelte components (PitchPlot, WaveformPlayer, ClusterPanel, etc.)
+- `src/lib/stores/` — App state (appState.ts, params.ts)
 
 ### Data Flow
 
@@ -59,7 +69,7 @@ python app.py
 
 - Single-user session model (not suitable for concurrent users)
 - Temp files stored in `/tmp/vocal_editor/`
-- Max upload: 100MB
+- Max upload: 100MB (enforced by both Flask and the SvelteKit Node adapter via `BODY_SIZE_LIMIT`)
 - Pitch range: 75-600 Hz
 - Output format: WAV
 - Rubberband pitch map upsampled to 5ms grid for accuracy

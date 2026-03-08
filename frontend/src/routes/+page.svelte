@@ -60,15 +60,29 @@
     $selectedIdx = idx;
   }
 
-  function onClusterDrag(idx: number, newShift: number) {
-    $clusters[idx].pitch_shift_semitones = newShift;
-    $clusters[idx].manually_edited = true;
-    $dirtyClusters = new Set([...$dirtyClusters, idx]);
-    $clusters = $clusters; // trigger reactivity
+  let _dragBatch: { idx: number; newShift: number }[] = [];
+  let _dragBatchRaf: number | null = null;
 
-    updatePitchCurveForCluster(idx);
-    refreshCorrectionCurve();
-    log(`Cluster ${idx + 1} moved to ${(newShift * 100).toFixed(1)} cents`);
+  function onClusterDrag(idx: number, newShift: number) {
+    _dragBatch.push({ idx, newShift });
+    if (_dragBatchRaf !== null) return;
+    _dragBatchRaf = requestAnimationFrame(() => {
+      _dragBatchRaf = null;
+      const batch = _dragBatch;
+      _dragBatch = [];
+
+      const newDirty = new Set($dirtyClusters);
+      for (const { idx, newShift } of batch) {
+        $clusters[idx].pitch_shift_semitones = newShift;
+        $clusters[idx].manually_edited = true;
+        newDirty.add(idx);
+        updatePitchCurveForCluster(idx);
+      }
+      $dirtyClusters = newDirty;
+      $clusters = $clusters;
+      refreshCorrectionCurve();
+      log(`${batch.length} cluster(s) moved`);
+    });
   }
 
   function onClusterResize(idx: number) {
@@ -229,6 +243,31 @@
     log('Applying corrections...');
 
     try {
+      // Sync any unsynced clusters to backend first
+      if (get(dirtyClusters).size > 0) {
+        const cls = get(clusters);
+        const clusterUpdates = cls.map((c, idx) => ({
+          idx,
+          start_time: c.start_time,
+          end_time: c.end_time,
+          note: c.note,
+          mean_freq: c.mean_freq,
+          pitch_shift_semitones: c.pitch_shift_semitones,
+          ramp_in_ms: c.ramp_in_ms,
+          ramp_out_ms: c.ramp_out_ms,
+          correction_strength: c.correction_strength,
+          smoothing_percent: c.smoothing_percent,
+          manually_edited: c.manually_edited || false,
+        }));
+        const syncResult = await api.syncClusters(clusterUpdates);
+        if (syncResult.error) {
+          log(`Error syncing: ${syncResult.error}`, 'error');
+          return;
+        }
+        $clusters = syncResult.clusters;
+        $dirtyClusters = new Set();
+      }
+
       const p = getAllParams();
       const result = await api.correct(p);
 
@@ -314,6 +353,31 @@
     log(`Deleting cluster ${idx + 1} (${cluster.note}), restoring original audio...`);
 
     try {
+      // Sync any unsynced clusters to backend first
+      if (get(dirtyClusters).size > 0) {
+        const cls = get(clusters);
+        const clusterUpdates = cls.map((c, i) => ({
+          idx: i,
+          start_time: c.start_time,
+          end_time: c.end_time,
+          note: c.note,
+          mean_freq: c.mean_freq,
+          pitch_shift_semitones: c.pitch_shift_semitones,
+          ramp_in_ms: c.ramp_in_ms,
+          ramp_out_ms: c.ramp_out_ms,
+          correction_strength: c.correction_strength,
+          smoothing_percent: c.smoothing_percent,
+          manually_edited: c.manually_edited || false,
+        }));
+        const syncResult = await api.syncClusters(clusterUpdates);
+        if (syncResult.error) {
+          log(`Error syncing: ${syncResult.error}`, 'error');
+          return;
+        }
+        $clusters = syncResult.clusters;
+        $dirtyClusters = new Set();
+      }
+
       const result = await api.deleteCluster(idx);
 
       if (result.error) {

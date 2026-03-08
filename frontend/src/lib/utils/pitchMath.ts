@@ -330,11 +330,33 @@ export function computePitchCurve(
   // Build sorted cluster lookup for binary search
   const sortedClusters = [...allClusters].sort((a, b) => a.start_time - b.start_time);
 
-  for (let i = 0; i < origTimes.length; i++) {
+  // Binary search for segment start index to avoid iterating from 0
+  let startIdx = 0;
+  if (segmentStart > -Infinity) {
+    let lo = 0, hi = origTimes.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (origTimes[mid] < segmentStart) lo = mid + 1;
+      else hi = mid;
+    }
+    startIdx = lo;
+  }
+
+  // Binary search for segment end index
+  let endIdx = origTimes.length - 1;
+  if (segmentEnd < Infinity) {
+    let lo = startIdx, hi = origTimes.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (origTimes[mid] <= segmentEnd) lo = mid + 1;
+      else hi = mid;
+    }
+    endIdx = lo - 1;
+  }
+
+  for (let i = startIdx; i <= endIdx; i++) {
     const t = origTimes[i];
     const origF = origFreqs[i];
-
-    if (t < segmentStart || t > segmentEnd) continue;
 
     newTimes.push(t);
 

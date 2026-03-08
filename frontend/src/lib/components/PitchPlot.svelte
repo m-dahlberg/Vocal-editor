@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import {
     clusters, times, frequencies, midiNotes,
     selectedIdx, selectedIndices, showMidi, showCorrectionCurve
@@ -38,7 +38,11 @@
   let _correctionCurveCents: (number | null)[] = [];
   let _playheadSvgPath: SVGPathElement | null = null;
   let _sineTimeout: ReturnType<typeof setTimeout> | null = null;
+  let _dragGhosts: HTMLDivElement[] = [];
   let _playheadTime = 0;
+  let _interacting = false;
+  let _suppressStoreEffect = false;
+  let _redrawScheduled = false;
 
   const COLORS = {
     pitchLine: '#2E86AB',
@@ -250,7 +254,7 @@
     }
   }
 
-  function _redraw() {
+  function _redrawImmediate() {
     if (!Plotly || !plotEl) return;
     Plotly.react(plotEl,
       buildTraces($times, $frequencies, $clusters, $midiNotes, $selectedIndices, $showMidi, $showCorrectionCurve),
@@ -259,6 +263,20 @@
     );
     Plotly.relayout(plotEl, { shapes: [] });
     _findPlayheadSvg();
+  }
+
+  function _redraw() {
+    if (_redrawScheduled) return;
+    _redrawScheduled = true;
+    requestAnimationFrame(() => {
+      _redrawScheduled = false;
+      _redrawImmediate();
+    });
+  }
+
+  function _redrawSync() {
+    _redrawScheduled = false;
+    _redrawImmediate();
   }
 
   function _redrawDragBox(clusterIdx: number) {
@@ -278,7 +296,7 @@
   function selectCluster(idx: number) {
     $selectedIndices = new Set([idx]);
     $selectedIdx = idx;
-    _redraw();
+    _redrawSync();
     onClusterSelect(idx, $clusters[idx]);
   }
 
@@ -288,14 +306,14 @@
     $selectedIndices = s;
     const first = s.size > 0 ? s.values().next().value! : null;
     $selectedIdx = first;
-    _redraw();
+    _redrawSync();
     if (first !== null) onClusterSelect(first, $clusters[first]);
   }
 
   function selectClusters(idxArray: number[]) {
     $selectedIndices = new Set(idxArray);
     $selectedIdx = idxArray.length > 0 ? idxArray[0] : null;
-    _redraw();
+    _redrawSync();
     if (idxArray.length > 0) onClusterSelect(idxArray[0], $clusters[idxArray[0]]);
   }
 
@@ -309,8 +327,8 @@
     let dragStartYRange: [number, number] | null = null;
     let hasMoved = false;
     let rampDragData: any = null;
-    let _dragBoxSvgCache: any[] = [];
     let _multiDragStartShifts: Map<number, number> | null = null;
+    let _currentSemitoneDelta = 0;
     let _selectStartTime: number | null = null;
     let _selectStartFreq: number | null = null;
 
@@ -351,6 +369,7 @@
         const resizeEdge = _getResizeEdge(e);
         if (resizeEdge) {
           mode = 'ramp-drag';
+          _interacting = true;
           const c = $clusters[resizeEdge.clusterIdx];
           rampDragData = {
             clusterIdx: resizeEdge.clusterIdx,
@@ -368,6 +387,7 @@
         const ctrlClusterIdx = _getClusterAtMouse(e);
         if (ctrlClusterIdx !== null) {
           mode = 'smooth-note';
+          _interacting = true;
           dragIdx = ctrlClusterIdx;
           startY = e.clientY;
           startSmoothing = $clusters[dragIdx].smoothing_percent || 0;
@@ -382,6 +402,7 @@
       const resizeEdge = _getResizeEdge(e);
       if (resizeEdge) {
         mode = 'resize-box';
+        _interacting = true;
         const c = $clusters[resizeEdge.clusterIdx];
         resizeData = {
           clusterIdx: resizeEdge.clusterIdx,
@@ -392,6 +413,24 @@
         startX = e.clientX;
         hasMoved = false;
         e.preventDefault();
+        selectCluster(resizeEdge.clusterIdx);
+
+        // Create ghost overlay for resize
+        const layout = (plotEl as any)._fullLayout;
+        if (layout) {
+          const h = boxHeight(_fullYRange);
+          const freq = clusterDisplayFreq(c);
+          const x0px = layout.xaxis.d2p(c.start_time) + layout.margin.l;
+          const x1px = layout.xaxis.d2p(c.end_time) + layout.margin.l;
+          const y0px = layout.yaxis.d2p(freq + h / 2) + layout.margin.t;
+          const y1px = layout.yaxis.d2p(freq - h / 2) + layout.margin.t;
+          const ghost = document.createElement('div');
+          ghost.style.cssText = `position:absolute;left:${x0px}px;top:${y0px}px;width:${x1px - x0px}px;height:${y1px - y0px}px;background:rgba(233,69,96,0.35);border:2px solid #e94560;pointer-events:none;z-index:100;box-sizing:border-box;`;
+          ghost.dataset.startLeft = String(x0px);
+          ghost.dataset.startWidth = String(x1px - x0px);
+          plotEl.appendChild(ghost);
+          _dragGhosts.push(ghost);
+        }
         return;
       }
 
@@ -409,6 +448,7 @@
           selectCluster(clusterIdx);
         }
         mode = 'drag-note';
+        _interacting = true;
         dragIdx = clusterIdx;
         startY = e.clientY;
         dragStartYRange = [..._yRange] as [number, number];
@@ -421,23 +461,24 @@
         }
         startShift = $clusters[dragIdx].pitch_shift_semitones;
 
-        // Cache SVG elements
-        _dragBoxSvgCache = [];
-        const allTraceEls = plotEl.querySelectorAll('.scatterlayer .trace');
+        // Create ghost overlay divs for each selected cluster
         const layout = (plotEl as any)._fullLayout;
-        for (const idx of $selectedIndices) {
-          const boxIdx = _boxTraceIndex(idx);
-          const labelIdx = boxIdx + 1;
-          const entry: any = { idx, paths: null, label: null, x0px: 0, x1px: 0 };
-          if (allTraceEls.length > labelIdx) {
-            entry.paths = allTraceEls[boxIdx].querySelectorAll('path');
-            entry.label = allTraceEls[labelIdx].querySelector('text');
+        if (layout) {
+          const plotRect = plotEl.getBoundingClientRect();
+          const h = boxHeight(_fullYRange);
+          for (const idx of $selectedIndices) {
+            const c = $clusters[idx];
+            const freq = clusterDisplayFreq(c);
+            const x0px = layout.xaxis.d2p(c.start_time) + layout.margin.l;
+            const x1px = layout.xaxis.d2p(c.end_time) + layout.margin.l;
+            const y0px = layout.yaxis.d2p(freq + h / 2) + layout.margin.t;
+            const y1px = layout.yaxis.d2p(freq - h / 2) + layout.margin.t;
+            const ghost = document.createElement('div');
+            ghost.style.cssText = `position:absolute;left:${x0px}px;top:${y0px}px;width:${x1px - x0px}px;height:${y1px - y0px}px;background:rgba(233,69,96,0.35);border:2px solid #e94560;pointer-events:none;z-index:100;box-sizing:border-box;`;
+            ghost.dataset.startTop = String(y0px);
+            plotEl.appendChild(ghost);
+            _dragGhosts.push(ghost);
           }
-          if (layout) {
-            entry.x0px = layout.xaxis.d2p($clusters[idx].start_time);
-            entry.x1px = layout.xaxis.d2p($clusters[idx].end_time);
-          }
-          _dragBoxSvgCache.push(entry);
         }
 
         // Sine preview after delay
@@ -470,7 +511,7 @@
     window.addEventListener('mousemove', (e: MouseEvent) => {
       if (!mode) return;
 
-      if (mode === 'drag-note' && dragIdx !== null && startY !== null && dragStartYRange) {
+      if (mode === 'drag-note' && dragIdx !== null && startY !== null && startShift !== null && dragStartYRange) {
         const dy = startY - e.clientY;
         if (Math.abs(dy) > 2) hasMoved = true;
         if (!hasMoved) return;
@@ -480,38 +521,18 @@
         const baseCents = 1200 * Math.log2(
           ($clusters[dragIdx].mean_freq + freqDelta) / $clusters[dragIdx].mean_freq
         );
-        const semitoneDelta = baseCents / 100;
+        _currentSemitoneDelta = baseCents / 100;
 
-        if (_multiDragStartShifts) {
-          const updatedClusters = [...$clusters];
-          for (const [idx, origShift] of _multiDragStartShifts) {
-            updatedClusters[idx] = { ...updatedClusters[idx], pitch_shift_semitones: origShift + semitoneDelta };
-          }
-          $clusters = updatedClusters;
-        }
-
-        const shiftFactor = Math.pow(2, $clusters[dragIdx].pitch_shift_semitones / 12);
+        // Compute sine frequency from original data + delta (no store write)
+        const currentShift = startShift + _currentSemitoneDelta;
+        const shiftFactor = Math.pow(2, currentShift / 12);
         sineUpdate($clusters[dragIdx].mean_freq * shiftFactor);
 
-        // Move boxes via direct SVG
-        const layout = (plotEl as any)._fullLayout;
-        const hasSvgRefs = layout && _dragBoxSvgCache.length > 0 &&
-          _dragBoxSvgCache.some((c: any) => c.paths && c.paths.length > 0);
-        if (hasSvgRefs) {
-          const h = boxHeight(_fullYRange);
-          for (const cached of _dragBoxSvgCache) {
-            const c = $clusters[cached.idx];
-            const freq = clusterDisplayFreq(c);
-            const y0px = layout.yaxis.d2p(freq - h / 2);
-            const y1px = layout.yaxis.d2p(freq + h / 2);
-            const d = `M${cached.x0px},${y0px}L${cached.x1px},${y0px}L${cached.x1px},${y1px}L${cached.x0px},${y1px}Z`;
-            if (cached.paths) cached.paths.forEach((p: SVGPathElement) => p.setAttribute('d', d));
-            if (cached.label) cached.label.setAttribute('y', String(layout.yaxis.d2p(freq)));
-          }
-        } else {
-          for (const idx of $selectedIndices) {
-            _redrawDragBox(idx);
-          }
+        // Move ghost overlays via CSS — zero Plotly overhead
+        const dy_px = startY - e.clientY;
+        for (const ghost of _dragGhosts) {
+          const startTop = parseFloat(ghost.dataset.startTop!);
+          ghost.style.top = `${startTop - dy_px}px`;
         }
       } else if (mode === 'smooth-note' && dragIdx !== null && startY !== null && startSmoothing !== null) {
         const dy = startY - e.clientY;
@@ -545,35 +566,19 @@
         const dx = e.clientX - startX;
         if (Math.abs(dx) > 2) hasMoved = true;
         if (!hasMoved) return;
-        const layout = (plotEl as any)._fullLayout;
-        if (!layout) return;
-        const rect = plotEl.getBoundingClientRect();
-        const px = e.clientX - rect.left - layout.margin.l;
-        const currentTime = layout.xaxis.p2d(px);
-        const updatedClusters = [...$clusters];
-        const c = { ...updatedClusters[resizeData.clusterIdx] };
 
-        if (resizeData.edge === 'left') {
-          let newStart = currentTime;
-          if (newStart >= c.end_time) newStart = c.end_time - 0.01;
-          if (resizeData.clusterIdx > 0) {
-            const prev = updatedClusters[resizeData.clusterIdx - 1];
-            if (newStart < prev.end_time) newStart = prev.end_time;
+        // Move ghost overlay via CSS
+        const ghost = _dragGhosts[0];
+        if (ghost) {
+          const startLeft = parseFloat(ghost.dataset.startLeft!);
+          const startWidth = parseFloat(ghost.dataset.startWidth!);
+          if (resizeData.edge === 'left') {
+            ghost.style.left = `${startLeft + dx}px`;
+            ghost.style.width = `${startWidth - dx}px`;
+          } else {
+            ghost.style.width = `${startWidth + dx}px`;
           }
-          c.start_time = Math.max(0, newStart);
-        } else {
-          let newEnd = currentTime;
-          if (newEnd <= c.start_time) newEnd = c.start_time + 0.01;
-          if (resizeData.clusterIdx < updatedClusters.length - 1) {
-            const next = updatedClusters[resizeData.clusterIdx + 1];
-            if (newEnd > next.start_time) newEnd = next.start_time;
-          }
-          c.end_time = newEnd;
         }
-        c.duration_ms = (c.end_time - c.start_time) * 1000;
-        updatedClusters[resizeData.clusterIdx] = c;
-        $clusters = updatedClusters;
-        _redraw();
       } else if (mode === 'draw-box' && startX !== null && drawStartTime !== null) {
         if (Math.abs(e.clientX - startX) > 2) hasMoved = true;
         if (!hasMoved) return;
@@ -656,8 +661,18 @@
       sineStop();
 
       if (mode === 'drag-note') {
-        _dragBoxSvgCache = [];
-        if (hasMoved) {
+        // Remove ghost overlays
+        for (const ghost of _dragGhosts) ghost.remove();
+        _dragGhosts = [];
+
+        if (hasMoved && _multiDragStartShifts) {
+          // Commit drag delta to store once on mouseup
+          const updatedClusters = [...$clusters];
+          for (const [idx, origShift] of _multiDragStartShifts) {
+            updatedClusters[idx] = { ...updatedClusters[idx], pitch_shift_semitones: origShift + _currentSemitoneDelta };
+          }
+          $clusters = updatedClusters;
+
           const capturedIndices = Array.from($selectedIndices);
           requestAnimationFrame(() => {
             for (const idx of capturedIndices) {
@@ -665,6 +680,7 @@
             }
           });
         }
+        _currentSemitoneDelta = 0;
         dragStartYRange = null;
         _multiDragStartShifts = null;
       } else if (mode === 'smooth-note') {
@@ -682,7 +698,41 @@
         }
         rampDragData = null;
       } else if (mode === 'resize-box') {
-        if (hasMoved && resizeData) {
+        // Remove ghost overlay
+        for (const ghost of _dragGhosts) ghost.remove();
+        _dragGhosts = [];
+
+        if (hasMoved && resizeData && startX !== null) {
+          // Commit the resize to the store
+          const layout = (plotEl as any)._fullLayout;
+          if (layout) {
+            const rect = plotEl.getBoundingClientRect();
+            const px = e.clientX - rect.left - layout.margin.l;
+            const currentTime = layout.xaxis.p2d(px);
+            const updatedClusters = [...$clusters];
+            const c = { ...updatedClusters[resizeData.clusterIdx] };
+
+            if (resizeData.edge === 'left') {
+              let newStart = currentTime;
+              if (newStart >= c.end_time) newStart = c.end_time - 0.01;
+              if (resizeData.clusterIdx > 0) {
+                const prev = updatedClusters[resizeData.clusterIdx - 1];
+                if (newStart < prev.end_time) newStart = prev.end_time;
+              }
+              c.start_time = Math.max(0, newStart);
+            } else {
+              let newEnd = currentTime;
+              if (newEnd <= c.start_time) newEnd = c.start_time + 0.01;
+              if (resizeData.clusterIdx < updatedClusters.length - 1) {
+                const next = updatedClusters[resizeData.clusterIdx + 1];
+                if (newEnd > next.start_time) newEnd = next.start_time;
+              }
+              c.end_time = newEnd;
+            }
+            c.duration_ms = (c.end_time - c.start_time) * 1000;
+            updatedClusters[resizeData.clusterIdx] = c;
+            $clusters = updatedClusters;
+          }
           onClusterResize(resizeData.clusterIdx);
         }
         resizeData = null;
@@ -747,6 +797,10 @@
         plotEl.style.cursor = '';
       }
 
+      if (_interacting) {
+        _interacting = false;
+        _redrawSync();
+      }
       mode = null; dragIdx = null; startX = null; startY = null;
       startShift = null; startSmoothing = null; rampDragData = null;
       panStartXRange = null; panStartYRange = null; hasMoved = false;
@@ -858,25 +912,48 @@
   $effect(() => {
     const t = $times;
     const f = $frequencies;
-    const cls = $clusters;
-    const midi = $midiNotes;
     if (!Plotly || !plotEl) return;
 
+    // Skip full redraw when updatePitchSegment already handled the Plotly update
+    if (_suppressStoreEffect) return;
+
     if (t.length > 0) {
-      _yRange = getYRange(f);
-      _fullYRange = [..._yRange] as [number, number];
-      _fullXRange = [0, t[t.length - 1]];
-      _xRange = [..._fullXRange] as [number, number];
+      const newFullX: [number, number] = [0, t[t.length - 1]];
+      const newFullY = getYRange(f);
+
+      // Only reset zoom when the data extent actually changes (new audio loaded),
+      // not when a segment is updated during editing
+      const extentChanged =
+        Math.abs(newFullX[1] - _fullXRange[1]) > 0.01 ||
+        Math.abs(newFullY[0] - _fullYRange[0]) > 1 ||
+        Math.abs(newFullY[1] - _fullYRange[1]) > 1;
+
+      _fullXRange = newFullX;
+      _fullYRange = [...newFullY] as [number, number];
+
+      if (extentChanged) {
+        _xRange = [..._fullXRange] as [number, number];
+        _yRange = [..._fullYRange] as [number, number];
+      }
     }
 
-    _redraw();
+    // untrack prevents _redraw()'s internal store reads from becoming
+    // dependencies of this effect, so only $times/$frequencies trigger it
+    untrack(() => _redraw());
+  });
+
+  $effect(() => {
+    // Re-render when clusters or midi change, without resetting zoom
+    void $clusters;
+    void $midiNotes;
+    untrack(() => { if (Plotly && plotEl && !_interacting) _redraw(); });
   });
 
   $effect(() => {
     // Re-render when visibility toggles change
     void $showMidi;
     void $showCorrectionCurve;
-    if (Plotly && plotEl) _redraw();
+    untrack(() => { if (Plotly && plotEl) _redraw(); });
   });
 
   // Public API for parent to call
@@ -930,8 +1007,10 @@
       }
     }
 
+    _suppressStoreEffect = true;
     $times = newTimes;
     $frequencies = newFreqs;
+    _suppressStoreEffect = false;
     Plotly.restyle(plotEl, { x: [newTimes], y: [newFreqs] }, [0]);
   }
 

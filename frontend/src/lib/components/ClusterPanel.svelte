@@ -11,14 +11,20 @@
   let rampIn = $state(0);
   let rampOut = $state(0);
   let smoothing = $state(0);
+  let _skipSync = false;
 
-  // Sync local state when selection changes
+  // Sync local state only when the selected index changes (not on data changes)
+  let _prevIdx: number | null = null;
   $effect(() => {
-    const c = $selectedCluster;
-    if (c) {
-      rampIn = c.ramp_in_ms;
-      rampOut = c.ramp_out_ms;
-      smoothing = c.smoothing_percent;
+    const idx = $selectedIdx;
+    if (idx !== _prevIdx) {
+      _prevIdx = idx;
+      const c = idx !== null ? $clusters[idx] : null;
+      if (c) {
+        rampIn = c.ramp_in_ms;
+        rampOut = c.ramp_out_ms;
+        smoothing = c.smoothing_percent;
+      }
     }
   });
 
@@ -26,6 +32,7 @@
     if ($selectedIdx === null) return;
     const indices = $selectedIndices.size > 0 ? Array.from($selectedIndices) : [$selectedIdx];
 
+    _skipSync = true;
     $clusters = $clusters.map((c, i) => {
       if (indices.includes(i)) {
         return {
@@ -38,6 +45,7 @@
       }
       return c;
     });
+    _skipSync = false;
 
     $dirtyClusters = new Set([...$dirtyClusters, ...indices]);
     onClusterParamChange();
