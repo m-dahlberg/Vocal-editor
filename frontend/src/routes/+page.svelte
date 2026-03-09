@@ -429,6 +429,10 @@
     waveformPlayer?.syncToRange(xRange, totalDuration);
   }
 
+  function onSeek(time: number) {
+    waveformPlayer?.seek(time);
+  }
+
   // --- Keyboard shortcuts ---
   function onKeyDown(e: KeyboardEvent) {
     if (e.code === 'Space' && (e.target as HTMLElement)?.tagName !== 'INPUT') {
@@ -469,6 +473,7 @@
       {onClusterRampDrag}
       onResetView={() => pitchPlot?.resetView()}
       {syncWaveform}
+      {onSeek}
     />
 
     <WaveformPlayer

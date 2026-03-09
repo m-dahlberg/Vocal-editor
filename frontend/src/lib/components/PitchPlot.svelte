@@ -18,12 +18,13 @@
     onClusterRampDrag: (idx: number, rampIn: number, rampOut: number) => void;
     onResetView: () => void;
     syncWaveform: (xRange: [number, number], totalDuration: number) => void;
+    onSeek?: (time: number) => void;
   }
 
   let {
     onClusterSelect, onClusterDrag, onClusterResize,
     onDrawBox, onClusterSmoothing, onClusterRampDrag,
-    onResetView, syncWaveform
+    onResetView, syncWaveform, onSeek
   }: Props = $props();
 
   let plotEl: HTMLDivElement;
@@ -786,9 +787,13 @@
             }
           }
         } else {
+          // Click on empty space without dragging — move playhead
           $selectedIndices = new Set();
           $selectedIdx = null;
           _redraw();
+          if (_selectStartTime !== null && onSeek) {
+            onSeek(_selectStartTime);
+          }
         }
         Plotly.relayout(plotEl, { shapes: [] });
         _selectStartTime = null;
@@ -962,9 +967,13 @@
     if (!$times?.length) return;
 
     const span = _xRange[1] - _xRange[0];
-    if (time > _xRange[1] - span * 0.1) {
+    if (time > _xRange[1] - span * 0.1 && _xRange[1] < _fullXRange[1]) {
       let x0 = Math.max(_fullXRange[0], time - span * 0.1);
-      let x1 = Math.min(_fullXRange[1], x0 + span);
+      let x1 = x0 + span;
+      if (x1 > _fullXRange[1]) {
+        x1 = _fullXRange[1];
+        x0 = Math.max(_fullXRange[0], x1 - span);
+      }
       _xRange = [x0, x1];
       Plotly.relayout(plotEl, { 'xaxis.range': _xRange });
       syncWaveform(_xRange, _fullXRange[1]);
