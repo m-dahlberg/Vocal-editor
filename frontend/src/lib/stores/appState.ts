@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import type { Cluster, MidiNote, LogMessage } from '$lib/utils/types';
+import type { Cluster, MidiNote, LogMessage, TimeEdit } from '$lib/utils/types';
 
 // Audio/analysis state
 export const clusters = writable<Cluster[]>([]);
@@ -15,6 +15,13 @@ export const selectedIndices = writable<Set<number>>(new Set());
 
 // Dirty tracking
 export const dirtyClusters = writable<Set<number>>(new Set());
+
+// Tab state
+export const activeTab = writable<'pitch' | 'time'>('pitch');
+
+// Time alignment edits
+export const timeEdits = writable<TimeEdit[]>([]);
+export const dirtyTimeEdits = writable<Set<number>>(new Set());
 
 // UI state
 export const audioLoaded = writable(false);

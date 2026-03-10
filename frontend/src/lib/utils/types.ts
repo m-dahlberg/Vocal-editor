@@ -104,3 +104,14 @@ export interface RubberbandParams {
   window_long: boolean;
   smoothing: boolean;
 }
+
+export interface TimeEdit {
+  clusterIdx: number;
+  newStart: number;
+  newEnd: number;
+}
+
+export interface TimeStretchResult {
+  ok: boolean;
+  error?: string;
+}

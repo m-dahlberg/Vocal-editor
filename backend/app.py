@@ -20,6 +20,7 @@ from audio_engine import (
     process_full_audio, process_segment,
     clusters_to_json, get_audio_mono, hz_to_note,
     compute_avg_pitch_deviation, compute_cluster_pitch_variation,
+    generate_pitch_map,
     DEFAULT_TIME_RESOLUTION_MS, DEFAULT_MIN_FREQUENCY, DEFAULT_MAX_FREQUENCY,
     DEFAULT_FREQUENCY_TOLERANCE_CENTS, DEFAULT_MIN_NOTE_DURATION_MS,
     DEFAULT_MAX_GAP_TO_BRIDGE_MS, DEFAULT_SILENCE_THRESHOLD_DB,
@@ -49,6 +50,7 @@ SESSION = {
     'corrected_audio': None,
     'corrected_path': None,
     'params': {},
+    'time_edits': [],
 }
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'vocal_editor'
@@ -533,6 +535,71 @@ def update_cluster():
             cluster[key] = float(data[key])
 
     return jsonify({'ok': True})
+
+
+@app.route('/api/sync_time_edits', methods=['POST'])
+def sync_time_edits():
+    """
+    Receive time stretch edits, generate tempo map,
+    run Rubberband with time stretching (and pitch if present), return success/error.
+    """
+    if SESSION['audio'] is None or SESSION['sr'] is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+
+    if not SESSION['clusters']:
+        return jsonify({'error': 'No clusters - run analyze first'}), 400
+
+    data = request.json or {}
+    incoming_edits = data.get('time_edits', [])
+
+    # Convert to internal format
+    time_edits = []
+    for edit in incoming_edits:
+        time_edits.append({
+            'cluster_idx': int(edit['clusterIdx']),
+            'new_start': float(edit['newStart']),
+            'new_end': float(edit['newEnd']),
+        })
+
+    SESSION['time_edits'] = time_edits
+    print(f"[DEBUG] sync_time_edits: {len(time_edits)} time edits received")
+
+    try:
+        from time_engine import process_combined, process_time_stretch
+
+        # Check if there are also pitch edits
+        has_pitch = any(
+            c['pitch_shift_semitones'] != 0 or c.get('smoothing_percent', 0) != 0
+            for c in SESSION['clusters']
+        )
+
+        if has_pitch:
+            # Combined pitch + time processing
+            success, msg = process_combined(
+                SESSION['audio'], SESSION['sr'],
+                SESSION['clusters'], SESSION['params'],
+                time_edits, SESSION['corrected_path'],
+            )
+        else:
+            # Time-only processing
+            rb_params = SESSION['params'].get('rb', {})
+            success, msg = process_time_stretch(
+                SESSION['audio'], SESSION['sr'],
+                SESSION['clusters'], time_edits,
+                rb_params, SESSION['corrected_path'],
+            )
+
+        if not success:
+            return jsonify({'ok': False, 'error': msg}), 500
+
+        corrected, _ = sf.read(SESSION['corrected_path'])
+        SESSION['corrected_audio'] = get_audio_mono(corrected) if len(corrected.shape) > 1 else corrected
+
+        return jsonify({'ok': True})
+
+    except Exception as e:
+        import traceback
+        return jsonify({'ok': False, 'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 
 if __name__ == '__main__':

@@ -2,7 +2,8 @@
   import { onMount, untrack } from 'svelte';
   import {
     clusters, times, frequencies, midiNotes,
-    selectedIdx, selectedIndices, showMidi, showCorrectionCurve
+    selectedIdx, selectedIndices, showMidi, showCorrectionCurve,
+    activeTab
   } from '$lib/stores/appState';
   import { NOTE_FREQ_MAP, getYRange, clusterDisplayFreq, boxHeight } from '$lib/utils/pitchMath';
   import { play as sinePlay, updateFrequency as sineUpdate, stop as sineStop } from '$lib/utils/sinePlayer';
@@ -959,6 +960,20 @@
     void $showMidi;
     void $showCorrectionCurve;
     untrack(() => { if (Plotly && plotEl) _redraw(); });
+  });
+
+  // Relayout Plotly when switching back to pitch tab (container was display:none)
+  $effect(() => {
+    const tab = $activeTab;
+    untrack(() => {
+      if (tab === 'pitch' && Plotly && plotEl) {
+        // Use requestAnimationFrame to wait for the container to be visible
+        requestAnimationFrame(() => {
+          Plotly.Plots.resize(plotEl);
+          _redraw();
+        });
+      }
+    });
   });
 
   // Public API for parent to call

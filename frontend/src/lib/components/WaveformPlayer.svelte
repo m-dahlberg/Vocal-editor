@@ -153,17 +153,20 @@
       isPlayingState = false;
 
       if (peaks) {
-        const ctx = new AudioContext();
-        audioEl.src = url;
-        audioEl.load();
-        peaks.setSource({
-          mediaElement: audioEl,
-          webAudio: {
-            audioContext: ctx,
-          },
-        }, (err) => {
-          if (err) { console.error('peaks.js setSource error:', err); return; }
-          onReady(peaks!);
+        // Destroy old instance and reinitialize to reliably load new audio
+        stopPlayheadLoop();
+        peaks.destroy();
+        peaks = null;
+        initializing = true;
+        initPeaks(url).then((instance) => {
+          initializing = false;
+          if (!mounted) { instance.destroy(); return; }
+          peaks = instance;
+          setupEvents(peaks);
+          onReady(peaks);
+        }).catch((err) => {
+          initializing = false;
+          console.error('peaks.js reinit error:', err);
         });
       } else if (!initializing) {
         initializing = true;

@@ -6,11 +6,16 @@
   import WaveformPlayer from '$lib/components/WaveformPlayer.svelte';
   import LogPanel from '$lib/components/LogPanel.svelte';
   import HelpModal from '$lib/components/HelpModal.svelte';
+  import TabBar from '$lib/components/TabBar.svelte';
+  import TimeAlignmentView from '$lib/components/TimeAlignmentView.svelte';
+  import TimeAlignmentParams from '$lib/components/TimeAlignmentParams.svelte';
+  import TimeClusterPanel from '$lib/components/TimeClusterPanel.svelte';
   import * as api from '$lib/api';
   import {
     clusters, times, frequencies, originalTimes, originalFrequencies,
     midiNotes, selectedIdx, selectedIndices, dirtyClusters,
-    audioLoaded, audioUrl, processing, log
+    audioLoaded, audioUrl, processing, log,
+    activeTab, timeEdits, dirtyTimeEdits
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
@@ -18,6 +23,7 @@
   import type { Cluster } from '$lib/utils/types';
 
   let pitchPlot: PitchPlot;
+  let timeAlignmentView: TimeAlignmentView;
   let waveformPlayer: WaveformPlayer;
 
   // --- Pitch curve helpers ---
@@ -223,6 +229,12 @@
       $midiNotes = result.midi_notes;
       $audioUrl = api.audioUrl();
 
+      // Clear all edits (pitch + time)
+      $dirtyClusters = new Set();
+      $timeEdits = [];
+      $dirtyTimeEdits = new Set();
+      $selectedIndices = new Set();
+
       refreshCorrectionCurve();
       log(`Analysis complete: ${result.cluster_count} clusters, ${result.duration.toFixed(1)}s`);
       $selectedIdx = null;
@@ -394,20 +406,34 @@
       }
       $dirtyClusters = newDirty;
 
+      // Remap time edits: remove the deleted cluster's edit, shift higher indices down
+      $timeEdits = $timeEdits
+        .filter(e => e.clusterIdx !== idx)
+        .map(e => e.clusterIdx > idx ? { ...e, clusterIdx: e.clusterIdx - 1 } : e);
+      const oldDirtyTime = get(dirtyTimeEdits);
+      const newDirtyTime = new Set<number>();
+      for (const di of oldDirtyTime) {
+        if (di < idx) newDirtyTime.add(di);
+        else if (di > idx) newDirtyTime.add(di - 1);
+      }
+      $dirtyTimeEdits = newDirtyTime;
+
       $clusters = result.clusters;
       $selectedIdx = null;
 
-      // Re-analyze pitch for the restored segment
-      const buffer = 0.3;
-      const segResult = await api.analyzeSegment(
-        cluster.start_time - buffer,
-        cluster.end_time + buffer
-      );
-      if (segResult.ok) {
-        pitchPlot?.updatePitchSegment(
-          segResult.times, segResult.frequencies,
-          segResult.start_time, segResult.end_time
+      // Re-analyze pitch for the restored segment (only if pitch plot is active)
+      if ($activeTab === 'pitch') {
+        const buffer = 0.3;
+        const segResult = await api.analyzeSegment(
+          cluster.start_time - buffer,
+          cluster.end_time + buffer
         );
+        if (segResult.ok) {
+          pitchPlot?.updatePitchSegment(
+            segResult.times, segResult.frequencies,
+            segResult.start_time, segResult.end_time
+          );
+        }
       }
 
       $audioUrl = api.audioUrl();
@@ -420,9 +446,41 @@
     }
   }
 
+  // --- Time alignment callbacks ---
+
+  async function applyTimeEdits() {
+    const edits = get(timeEdits);
+    if (edits.length === 0) {
+      log('No time edits to apply', 'warn');
+      return;
+    }
+
+    $processing = true;
+    log(`Applying ${edits.length} time edit(s)...`);
+
+    try {
+      const result = await api.syncTimeEdits(edits);
+      if (result.error) {
+        log(`Error: ${result.error}`, 'error');
+        return;
+      }
+      $audioUrl = api.audioUrl();
+      $dirtyTimeEdits = new Set();
+      log('Time edits applied successfully');
+    } catch (e: any) {
+      log(`Error: ${e}`, 'error');
+    } finally {
+      $processing = false;
+    }
+  }
+
   // --- Playhead sync ---
   function onTimeUpdate(time: number) {
-    pitchPlot?.updatePlayhead(time);
+    if ($activeTab === 'pitch') {
+      pitchPlot?.updatePlayhead(time);
+    } else {
+      timeAlignmentView?.updatePlayhead(time);
+    }
   }
 
   function syncWaveform(xRange: [number, number], totalDuration: number) {
@@ -455,26 +513,46 @@
 <HelpModal />
 
 <div class="main-layout">
-  <ParameterPanel
-    onAnalyze={runAnalyze}
-    onCorrect={runCorrect}
-    onUpdateAudio={processDirtyClusters}
-    onExport={runExport}
-  />
+  {#if $activeTab === 'pitch'}
+    <ParameterPanel
+      onAnalyze={runAnalyze}
+      onCorrect={runCorrect}
+      onUpdateAudio={processDirtyClusters}
+      onExport={runExport}
+    />
+  {:else}
+    <TimeAlignmentParams
+      onAnalyze={runAnalyze}
+      onApplyTimeEdits={applyTimeEdits}
+      onExport={runExport}
+    />
+  {/if}
 
   <main class="center-panel">
-    <PitchPlot
-      bind:this={pitchPlot}
-      {onClusterSelect}
-      {onClusterDrag}
-      {onClusterResize}
-      {onDrawBox}
-      {onClusterSmoothing}
-      {onClusterRampDrag}
-      onResetView={() => pitchPlot?.resetView()}
-      {syncWaveform}
-      {onSeek}
-    />
+    <TabBar />
+    <div style:display={$activeTab === 'pitch' ? 'contents' : 'none'}>
+      <PitchPlot
+        bind:this={pitchPlot}
+        {onClusterSelect}
+        {onClusterDrag}
+        {onClusterResize}
+        {onDrawBox}
+        {onClusterSmoothing}
+        {onClusterRampDrag}
+        onResetView={() => pitchPlot?.resetView()}
+        {syncWaveform}
+        {onSeek}
+      />
+    </div>
+    <div style:display={$activeTab === 'time' ? 'contents' : 'none'}>
+      <TimeAlignmentView
+        bind:this={timeAlignmentView}
+        {onClusterSelect}
+        {onDrawBox}
+        {syncWaveform}
+        {onSeek}
+      />
+    </div>
 
     <WaveformPlayer
       bind:this={waveformPlayer}
@@ -484,5 +562,9 @@
     <LogPanel />
   </main>
 
-  <ClusterPanel {onClusterParamChange} />
+  {#if $activeTab === 'pitch'}
+    <ClusterPanel {onClusterParamChange} />
+  {:else}
+    <TimeClusterPanel />
+  {/if}
 </div>

@@ -1,4 +1,4 @@
-import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster } from '$lib/utils/types';
+import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, TimeEdit, TimeStretchResult } from '$lib/utils/types';
 
 async function post(url: string, body?: object): Promise<any> {
   const opts: RequestInit = { method: 'POST' };
@@ -62,4 +62,8 @@ export function audioUrl(): string {
 
 export function exportUrl(): string {
   return '/api/export';
+}
+
+export async function syncTimeEdits(edits: TimeEdit[]): Promise<TimeStretchResult> {
+  return post('/api/sync_time_edits', { time_edits: edits });
 }
