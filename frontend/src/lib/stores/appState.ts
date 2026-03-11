@@ -9,6 +9,10 @@ export const originalTimes = writable<number[]>([]);
 export const originalFrequencies = writable<(number | null)[]>([]);
 export const midiNotes = writable<MidiNote[]>([]);
 
+// Reference audio
+export const referenceClusters = writable<Cluster[]>([]);
+export const referenceLoaded = writable(false);
+
 // Selection
 export const selectedIdx = writable<number | null>(null);
 export const selectedIndices = writable<Set<number>>(new Set());

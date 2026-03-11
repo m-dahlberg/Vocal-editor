@@ -51,6 +51,8 @@ SESSION = {
     'corrected_path': None,
     'params': {},
     'time_edits': [],
+    'reference_path': None,
+    'reference_clusters': [],
 }
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'vocal_editor'
@@ -98,6 +100,37 @@ def upload_audio():
     SESSION['params'] = get_default_params()
 
     return jsonify({'ok': True, 'filename': file.filename})
+
+
+@app.route('/api/upload_reference', methods=['POST'])
+def upload_reference():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+
+    file = request.files['file']
+    path = UPLOAD_DIR / f"reference_{uuid.uuid4().hex}.wav"
+    file.save(str(path))
+
+    SESSION['reference_path'] = str(path)
+
+    # Auto-analyze using current params (or defaults if no main audio yet)
+    params = SESSION['params'] if SESSION['params'] else get_default_params()
+
+    try:
+        times, frequencies, notes, sr, audio = analyze_pitch(str(path), params)
+        ref_clusters = cluster_notes(times, frequencies, notes, audio, sr, params)
+        SESSION['reference_clusters'] = ref_clusters
+
+        return jsonify({
+            'ok': True,
+            'filename': file.filename,
+            'cluster_count': len(ref_clusters),
+            'clusters': clusters_to_json(ref_clusters),
+        })
+
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 
 @app.route('/api/upload_midi', methods=['POST'])

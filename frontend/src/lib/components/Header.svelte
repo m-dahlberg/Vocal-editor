@@ -1,15 +1,17 @@
 <script lang="ts">
-  import { uploadAudio, uploadMidi, audioUrl as getAudioUrl } from '$lib/api';
+  import { uploadAudio, uploadMidi, uploadReference, audioUrl as getAudioUrl } from '$lib/api';
   import * as api from '$lib/api';
   import {
     audioLoaded, midiLoaded, fileStatus, showHelp, showMidi, showCorrectionCurve,
     processing, clusters, times, frequencies, originalTimes, originalFrequencies,
-    midiNotes, avgPitchDeviation, audioUrl, dirtyClusters, log
+    midiNotes, avgPitchDeviation, audioUrl, dirtyClusters, log,
+    referenceClusters, referenceLoaded
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
 
   let audioFileInput: HTMLInputElement;
   let midiFileInput: HTMLInputElement;
+  let referenceFileInput: HTMLInputElement;
 
   async function handleAudioUpload(e: Event) {
     const input = e.target as HTMLInputElement;
@@ -31,6 +33,30 @@
 
       // Auto-analyze
       await runAnalyze();
+    } catch (e: any) {
+      log(`Error: ${e}`, 'error');
+    } finally {
+      $processing = false;
+    }
+  }
+
+  async function handleReferenceUpload(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    $processing = true;
+    log(`Uploading reference ${file.name}...`);
+
+    try {
+      const result = await uploadReference(file);
+      if (result.error) {
+        log(`Error: ${result.error}`, 'error');
+        return;
+      }
+      $referenceLoaded = true;
+      $referenceClusters = result.clusters;
+      log(`Reference loaded: ${file.name} (${result.cluster_count} clusters)`);
     } catch (e: any) {
       log(`Error: ${e}`, 'error');
     } finally {
@@ -105,6 +131,10 @@
     <label class="btn btn-secondary">
       Audio
       <input type="file" bind:this={audioFileInput} accept=".wav,.mp3,.flac,.aiff" hidden onchange={handleAudioUpload}>
+    </label>
+    <label class="btn btn-secondary">
+      Reference
+      <input type="file" bind:this={referenceFileInput} accept=".wav,.mp3,.flac,.aiff" hidden onchange={handleReferenceUpload}>
     </label>
     <label class="btn btn-secondary">
       MIDI

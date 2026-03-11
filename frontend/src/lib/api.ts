@@ -17,6 +17,13 @@ export async function uploadAudio(file: File): Promise<UploadResult> {
   return r.json();
 }
 
+export async function uploadReference(file: File): Promise<any> {
+  const fd = new FormData();
+  fd.append('file', file);
+  const r = await fetch('/api/upload_reference', { method: 'POST', body: fd });
+  return r.json();
+}
+
 export async function uploadMidi(file: File): Promise<UploadResult> {
   const fd = new FormData();
   fd.append('file', file);

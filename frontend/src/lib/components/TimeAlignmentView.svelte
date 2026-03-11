@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
-    clusters, selectedIdx, selectedIndices, timeEdits, dirtyTimeEdits
+    clusters, selectedIdx, selectedIndices, timeEdits, dirtyTimeEdits,
+    referenceClusters, midiNotes
   } from '$lib/stores/appState';
   import { params } from '$lib/stores/params';
   import ProcessingOverlay from './ProcessingOverlay.svelte';
-  import type { Cluster, TimeEdit } from '$lib/utils/types';
+  import type { Cluster, MidiNote, TimeEdit } from '$lib/utils/types';
 
   interface Props {
     onClusterSelect: (idx: number, cluster: Cluster) => void;
@@ -41,11 +42,20 @@
     text: '#ccc',
     textSelected: '#fff',
     textDim: '#888',
+    refBox: 'rgba(76,175,80,0.25)',
+    refBoxEdge: '#4CAF50',
+    refText: '#a5d6a7',
+    midiLine: '#ab47bc',
+    midiText: '#ce93d8',
   };
 
   const MARGIN = { l: 60, r: 60, t: 30, b: 50 };
   const BOX_HEIGHT = 40;
-  const BOX_Y_CENTER = 0.45; // relative position in plot area
+  const BOX_GAP = 8;
+  const REF_BOX_Y_CENTER = 0.25; // reference row (above)
+  const BOX_Y_CENTER = 0.45; // main row (below)
+  const MIDI_LINE_HEIGHT = 3;
+  const MIDI_ROW_TOP = 0.68; // midi pitch lines row (below main)
   const EDGE_THRESHOLD_PX = 8;
 
   function getEditedBounds(idx: number): { start: number; end: number } {
@@ -158,6 +168,92 @@
       }
     }
 
+    // Draw reference boxes (green row above main)
+    const refCls = $referenceClusters;
+    if (refCls.length > 0) {
+      const refBoxY = MARGIN.t + plotH * REF_BOX_Y_CENTER - BOX_HEIGHT / 2;
+
+      for (let i = 0; i < refCls.length; i++) {
+        const rc = refCls[i];
+        const x0 = timeToPx(rc.start_time);
+        const x1 = timeToPx(rc.end_time);
+
+        if (x1 < MARGIN.l || x0 > w - MARGIN.r) continue;
+
+        ctx.fillStyle = COLORS.refBox;
+        ctx.fillRect(x0, refBoxY, x1 - x0, BOX_HEIGHT);
+
+        ctx.strokeStyle = COLORS.refBoxEdge;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x0, refBoxY, x1 - x0, BOX_HEIGHT);
+
+        const boxW = x1 - x0;
+        if (boxW > 20) {
+          ctx.fillStyle = COLORS.refText;
+          ctx.font = '11px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(`${i + 1}:${rc.note}`, (x0 + x1) / 2, refBoxY + BOX_HEIGHT / 2);
+        }
+      }
+    }
+
+    // MIDI reference pitch lines
+    const midiData = $midiNotes;
+    if (midiData.length > 0) {
+      // Compute frequency range from MIDI notes
+      const midiFreqs = midiData.map(n => n.frequency);
+      const minFreq = Math.min(...midiFreqs);
+      const maxFreq = Math.max(...midiFreqs);
+      // Reserve vertical space for MIDI row
+      const midiRowTop = MARGIN.t + plotH * MIDI_ROW_TOP;
+      const midiRowHeight = plotH * 0.25;
+
+      // Map frequency to Y position within the MIDI row (higher pitch = higher on screen)
+      const freqRange = maxFreq - minFreq;
+      const freqToY = (freq: number): number => {
+        if (freqRange < 1) return midiRowTop + midiRowHeight / 2;
+        const ratio = (freq - minFreq) / freqRange;
+        return midiRowTop + midiRowHeight - ratio * midiRowHeight;
+      };
+
+      // Row label
+      ctx.fillStyle = COLORS.textDim;
+      ctx.font = '10px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'top';
+      ctx.fillText('MIDI', MARGIN.l - 6, midiRowTop);
+
+      for (let i = 0; i < midiData.length; i++) {
+        const mn = midiData[i];
+        const x0 = timeToPx(mn.start_time);
+        const x1 = timeToPx(mn.end_time);
+
+        if (x1 < MARGIN.l || x0 > w - MARGIN.r) continue;
+
+        const y = freqToY(mn.frequency);
+
+        // Draw line
+        ctx.strokeStyle = COLORS.midiLine;
+        ctx.lineWidth = MIDI_LINE_HEIGHT;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(Math.max(x0, MARGIN.l), y);
+        ctx.lineTo(Math.min(x1, w - MARGIN.r), y);
+        ctx.stroke();
+
+        // Note label
+        const lineW = x1 - x0;
+        if (lineW > 18) {
+          ctx.fillStyle = COLORS.midiText;
+          ctx.font = '9px sans-serif';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(mn.note_name, Math.max(x0, MARGIN.l) + 2, y - 3);
+        }
+      }
+    }
+
     // Playhead
     const phx = timeToPx(_playheadTime);
     if (phx >= MARGIN.l && phx <= w - MARGIN.r) {
@@ -249,6 +345,7 @@
     let startY = 0;
     let hasMoved = false;
     let edgeDragData: { clusterIdx: number; edge: 'left' | 'right'; origStart: number; origEnd: number } | null = null;
+    let moveDragData: { clusterIdx: number; origStart: number; origEnd: number } | null = null;
     let panStartXRange: [number, number] | null = null;
     let drawStartTime: number | null = null;
 
@@ -304,6 +401,28 @@
         return;
       }
 
+      // Click on cluster body (not edge) → start move-drag
+      const clusterAtPx = getClusterAtPx(px, py);
+      if (clusterAtPx !== null && !e.shiftKey) {
+        const bounds = getEditedBounds(clusterAtPx);
+        mode = 'move-drag';
+        moveDragData = {
+          clusterIdx: clusterAtPx,
+          origStart: bounds.start,
+          origEnd: bounds.end,
+        };
+        startX = e.clientX;
+        hasMoved = false;
+
+        // Select the cluster
+        $selectedIndices = new Set([clusterAtPx]);
+        $selectedIdx = clusterAtPx;
+        onClusterSelect(clusterAtPx, $clusters[clusterAtPx]);
+        scheduleDraw();
+        e.preventDefault();
+        return;
+      }
+
       // Shift+Click → toggle multi-select
       const clusterIdx = getClusterAtPx(px, py);
       if (e.shiftKey && clusterIdx !== null) {
@@ -313,16 +432,6 @@
         const first = s.size > 0 ? s.values().next().value! : null;
         $selectedIdx = first;
         if (first !== null) onClusterSelect(first, $clusters[first]);
-        scheduleDraw();
-        e.preventDefault();
-        return;
-      }
-
-      // Click on cluster → select
-      if (clusterIdx !== null) {
-        $selectedIndices = new Set([clusterIdx]);
-        $selectedIdx = clusterIdx;
-        onClusterSelect(clusterIdx, $clusters[clusterIdx]);
         scheduleDraw();
         e.preventDefault();
         return;
@@ -348,6 +457,8 @@
         const edge = getEdgeAtPx(px, py);
         if (edge) {
           canvasEl.style.cursor = 'ew-resize';
+        } else if (getClusterAtPx(px, py) !== null) {
+          canvasEl.style.cursor = 'grab';
         } else if (e.altKey && isInPlotArea(px, py)) {
           canvasEl.style.cursor = 'crosshair';
         } else if (e.ctrlKey && e.shiftKey && isInPlotArea(px, py)) {
@@ -370,7 +481,20 @@
         return;
       }
 
-      if (mode === 'edge-drag' && edgeDragData) {
+      if (mode === 'move-drag' && moveDragData) {
+        const dx = e.clientX - startX;
+        if (Math.abs(dx) > 2) hasMoved = true;
+        if (!hasMoved) return;
+
+        const rect = canvasEl.getBoundingClientRect();
+        const plotW = rect.width - MARGIN.l - MARGIN.r;
+        const timePerPx = (_xRange[1] - _xRange[0]) / plotW;
+        const deltaTime = dx * timePerPx;
+
+        canvasEl.style.cursor = 'grabbing';
+        applyMoveDrag(moveDragData.clusterIdx, deltaTime, moveDragData.origStart, moveDragData.origEnd);
+        scheduleDraw();
+      } else if (mode === 'edge-drag' && edgeDragData) {
         const dx = e.clientX - startX;
         if (Math.abs(dx) > 2) hasMoved = true;
         if (!hasMoved) return;
@@ -401,7 +525,10 @@
     });
 
     window.addEventListener('mouseup', (e: MouseEvent) => {
-      if (mode === 'draw-box') {
+      if (mode === 'move-drag') {
+        canvasEl.style.cursor = '';
+        // If no actual drag happened, it was just a click-select (already handled in mousedown)
+      } else if (mode === 'draw-box') {
         if (hasMoved && drawStartTime !== null) {
           const rect = canvasEl.getBoundingClientRect();
           const endTime = pxToTime(e.clientX - rect.left);
@@ -420,6 +547,7 @@
       }
       mode = null;
       edgeDragData = null;
+      moveDragData = null;
       panStartXRange = null;
       hasMoved = false;
     });
@@ -463,6 +591,96 @@
         });
       }
     }, { passive: false });
+  }
+
+  function applyMoveDrag(
+    clusterIdx: number,
+    deltaTime: number,
+    origStart: number,
+    origEnd: number
+  ) {
+    const cls = $clusters;
+    const duration = origEnd - origStart;
+    let newStart = origStart + deltaTime;
+    let newEnd = origEnd + deltaTime;
+
+    // Clamp against previous neighbor's start (can't move past it)
+    if (clusterIdx > 0) {
+      const prevBounds = getEditedBounds(clusterIdx - 1);
+      const minStart = prevBounds.start;
+      if (newStart < minStart) {
+        newStart = minStart;
+        newEnd = newStart + duration;
+      }
+    } else {
+      // No previous neighbor — don't go below 0
+      if (newStart < 0) {
+        newStart = 0;
+        newEnd = duration;
+      }
+    }
+
+    // Clamp against next neighbor's end (can't move past it)
+    if (clusterIdx < cls.length - 1) {
+      const nextBounds = getEditedBounds(clusterIdx + 1);
+      const maxEnd = nextBounds.end;
+      if (newEnd > maxEnd) {
+        newEnd = maxEnd;
+        newStart = newEnd - duration;
+      }
+    }
+
+    // Push/restore previous neighbor if overlapping
+    if (clusterIdx > 0) {
+      const prevIdx = clusterIdx - 1;
+      const prevBounds = getEditedBounds(prevIdx);
+      const origPrevEnd = cls[prevIdx].end_time;
+
+      if (newStart < prevBounds.end) {
+        // Push previous neighbor's end to our start
+        const prevStart = prevBounds.start;
+        const minDuration = $params.min_note_duration_ms / 1000;
+        const clampedEnd = Math.max(newStart, prevStart + minDuration);
+        updateTimeEdit(prevIdx, prevStart, clampedEnd);
+      } else if (prevBounds.end < origPrevEnd) {
+        // Restore previous neighbor toward original
+        const restoredEnd = Math.min(newStart, origPrevEnd);
+        const prevStart = prevBounds.start;
+        if (Math.abs(restoredEnd - origPrevEnd) < 0.001 &&
+            Math.abs(prevStart - cls[prevIdx].start_time) < 0.001) {
+          removeTimeEdit(prevIdx);
+        } else {
+          updateTimeEdit(prevIdx, prevStart, restoredEnd);
+        }
+      }
+    }
+
+    // Push/restore next neighbor if overlapping
+    if (clusterIdx < cls.length - 1) {
+      const nextIdx = clusterIdx + 1;
+      const nextBounds = getEditedBounds(nextIdx);
+      const origNextStart = cls[nextIdx].start_time;
+
+      if (newEnd > nextBounds.start) {
+        // Push next neighbor's start to our end
+        const nextEnd = nextBounds.end;
+        const minDuration = $params.min_note_duration_ms / 1000;
+        const clampedStart = Math.min(newEnd, nextEnd - minDuration);
+        updateTimeEdit(nextIdx, clampedStart, nextEnd);
+      } else if (nextBounds.start > origNextStart) {
+        // Restore next neighbor toward original
+        const restoredStart = Math.max(newEnd, origNextStart);
+        const nextEnd = nextBounds.end;
+        if (Math.abs(restoredStart - origNextStart) < 0.001 &&
+            Math.abs(nextEnd - cls[nextIdx].end_time) < 0.001) {
+          removeTimeEdit(nextIdx);
+        } else {
+          updateTimeEdit(nextIdx, restoredStart, nextEnd);
+        }
+      }
+    }
+
+    updateTimeEdit(clusterIdx, newStart, newEnd);
   }
 
   function applyEdgeDrag(
@@ -612,18 +830,25 @@
   // --- Reactive drawing ---
 
   $effect(() => {
-    // Re-draw when clusters, selection, or time edits change
+    // Re-draw when clusters, selection, time edits, or reference change
     void $clusters;
     void $selectedIndices;
     void $timeEdits;
+    void $referenceClusters;
+    void $midiNotes;
     if (_mounted) scheduleDraw();
   });
 
   $effect(() => {
     // Update x range when clusters change
     const cls = $clusters;
-    if (cls.length > 0) {
-      const maxEnd = Math.max(...cls.map(c => c.end_time));
+    const refCls2 = $referenceClusters;
+    const midiNts = $midiNotes;
+    if (cls.length > 0 || refCls2.length > 0 || midiNts.length > 0) {
+      const mainMax = cls.length > 0 ? Math.max(...cls.map(c => c.end_time)) : 0;
+      const refMax = refCls2.length > 0 ? Math.max(...refCls2.map(c => c.end_time)) : 0;
+      const midiMax = midiNts.length > 0 ? Math.max(...midiNts.map(n => n.end_time)) : 0;
+      const maxEnd = Math.max(mainMax, refMax, midiMax);
       const newFullX: [number, number] = [0, maxEnd * 1.05];
       const extentChanged = Math.abs(newFullX[1] - _fullXRange[1]) > 0.01;
       _fullXRange = newFullX;
@@ -673,7 +898,7 @@
 <div class="plot-container" bind:this={containerEl}>
   <canvas bind:this={canvasEl}></canvas>
   <div class="plot-controls">
-    <span class="zoom-hint">Scroll to zoom X · Ctrl+Shift+Drag to pan · Drag edges to stretch/compress · Alt+Drag to draw box · Shift+click to multi-select · Delete to remove</span>
+    <span class="zoom-hint">Scroll to zoom X · Ctrl+Shift+Drag to pan · Drag box to move · Drag edges to stretch/compress · Alt+Drag to draw box · Shift+click to multi-select · Delete to remove</span>
   </div>
   <ProcessingOverlay />
 </div>

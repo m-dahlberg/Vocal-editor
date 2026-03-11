@@ -17,11 +17,11 @@ export interface Cluster {
 }
 
 export interface MidiNote {
-  note: string;
+  note_name: string;
+  note_number: number;
   frequency: number;
   start_time: number;
   end_time: number;
-  duration: number;
 }
 
 export interface AnalysisResult {
