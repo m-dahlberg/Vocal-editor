@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { activeTab } from '$lib/stores/appState';
+  import { activeTab, timeEdits, clusters } from '$lib/stores/appState';
+
+  const hasTimeEdits = $derived($timeEdits.length > 0);
+  const hasPitchEdits = $derived($clusters.some(c => c.pitch_shift_semitones !== 0 || (c.smoothing_percent ?? 0) !== 0));
 </script>
 
 <div class="tab-bar">
@@ -7,12 +10,22 @@
     class="tab-btn"
     class:active={$activeTab === 'pitch'}
     onclick={() => $activeTab = 'pitch'}
-  >Pitch</button>
+  >
+    Pitch
+    {#if hasTimeEdits}
+      <span class="badge" title="Time edits active"></span>
+    {/if}
+  </button>
   <button
     class="tab-btn"
     class:active={$activeTab === 'time'}
     onclick={() => $activeTab = 'time'}
-  >Time Alignment</button>
+  >
+    Time Alignment
+    {#if hasPitchEdits}
+      <span class="badge" title="Pitch edits active"></span>
+    {/if}
+  </button>
 </div>
 
 <style>
@@ -24,6 +37,7 @@
     padding: 0 60px;
   }
   .tab-btn {
+    position: relative;
     padding: 8px 20px;
     background: none;
     border: none;
@@ -40,5 +54,14 @@
   .tab-btn.active {
     color: var(--accent);
     border-bottom-color: var(--accent);
+  }
+  .badge {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent2, #f0a);
+    margin-left: 5px;
+    vertical-align: super;
   }
 </style>

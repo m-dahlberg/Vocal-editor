@@ -3,7 +3,7 @@
   import {
     clusters, times, frequencies, midiNotes,
     selectedIdx, selectedIndices, showMidi, showCorrectionCurve,
-    activeTab
+    activeTab, viewXRange
   } from '$lib/stores/appState';
   import { NOTE_FREQ_MAP, getYRange, clusterDisplayFreq, boxHeight } from '$lib/utils/pitchMath';
   import { play as sinePlay, updateFrequency as sineUpdate, stop as sineStop } from '$lib/utils/sinePlayer';
@@ -36,6 +36,12 @@
   let _yRange: [number, number] = [75, 600];
   let _fullXRange: [number, number] = [0, 10];
   let _fullYRange: [number, number] = [75, 600];
+
+  /** Update _xRange and push to shared store so the other tab stays in sync. */
+  function setXRange(range: [number, number]) {
+    _xRange = range;
+    $viewXRange = range;
+  }
   let _correctionCurveTimes: (number | null)[] = [];
   let _correctionCurveCents: (number | null)[] = [];
   let _playheadSvgPath: SVGPathElement | null = null;
@@ -651,7 +657,7 @@
         if (y0 < _fullYRange[0] * 0.9) { y1 += _fullYRange[0] * 0.9 - y0; y0 = _fullYRange[0] * 0.9; }
         if (y1 > _fullYRange[1] * 1.1) { y0 -= y1 - _fullYRange[1] * 1.1; y1 = _fullYRange[1] * 1.1; }
 
-        _xRange = [x0, x1];
+        setXRange([x0, x1]);
         _yRange = [y0, y1];
         Plotly.relayout(plotEl, { 'xaxis.range': _xRange, 'yaxis.range': _yRange });
         syncWaveform(_xRange, _fullXRange[1]);
@@ -860,13 +866,13 @@
             Plotly.relayout(plotEl, { 'yaxis.range': _yRange });
           } else {
             if (px < 0 || px > plotW) return;
-            const xAtMouse = layout.xaxis.p2d(px);
-            let x0 = xAtMouse - (xAtMouse - _xRange[0]) * factor;
-            let x1 = xAtMouse + (_xRange[1] - xAtMouse) * factor;
+            const center = _playheadTime;
+            let x0 = center - (center - _xRange[0]) * factor;
+            let x1 = center + (_xRange[1] - center) * factor;
             x0 = Math.max(_fullXRange[0], x0);
             x1 = Math.min(_fullXRange[1], x1);
             if (x1 - x0 < 0.5) return;
-            _xRange = [x0, x1];
+            setXRange([x0, x1]);
             Plotly.relayout(plotEl, { 'xaxis.range': _xRange });
             syncWaveform(_xRange, _fullXRange[1]);
           }
@@ -938,7 +944,7 @@
       _fullYRange = [...newFullY] as [number, number];
 
       if (extentChanged) {
-        _xRange = [..._fullXRange] as [number, number];
+        setXRange([..._fullXRange] as [number, number]);
         _yRange = [..._fullYRange] as [number, number];
       }
     }
@@ -967,9 +973,13 @@
     const tab = $activeTab;
     untrack(() => {
       if (tab === 'pitch' && Plotly && plotEl) {
+        // Restore shared x-range from the other tab
+        _xRange = [...$viewXRange] as [number, number];
         // Use requestAnimationFrame to wait for the container to be visible
         requestAnimationFrame(() => {
           Plotly.Plots.resize(plotEl);
+          Plotly.relayout(plotEl, { 'xaxis.range': _xRange });
+          syncWaveform(_xRange, _fullXRange[1]);
           _redraw();
         });
       }
@@ -989,7 +999,7 @@
         x1 = _fullXRange[1];
         x0 = Math.max(_fullXRange[0], x1 - span);
       }
-      _xRange = [x0, x1];
+      setXRange([x0, x1]);
       Plotly.relayout(plotEl, { 'xaxis.range': _xRange });
       syncWaveform(_xRange, _fullXRange[1]);
       _findPlayheadSvg();
@@ -1057,11 +1067,16 @@
   }
 
   export function resetView() {
-    _xRange = [..._fullXRange] as [number, number];
+    setXRange([..._fullXRange] as [number, number]);
     _yRange = [..._fullYRange] as [number, number];
     Plotly.relayout(plotEl, { 'xaxis.range': _xRange, 'yaxis.range': _yRange });
     syncWaveform(_xRange, _fullXRange[1]);
     _findPlayheadSvg();
+  }
+
+  /** Update playhead time without triggering redraws (for use when tab is hidden). */
+  export function setPlayheadTime(time: number) {
+    _playheadTime = time;
   }
 
   export function getSelectedIndices(): number[] {

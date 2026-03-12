@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import {
     clusters, selectedIdx, selectedIndices, timeEdits, dirtyTimeEdits,
-    referenceClusters, midiNotes, showCorrectionCurve, backendTimemap
+    referenceClusters, midiNotes, showCorrectionCurve, backendTimemap,
+    activeTab, viewXRange
   } from '$lib/stores/appState';
   import { params } from '$lib/stores/params';
   import ProcessingOverlay from './ProcessingOverlay.svelte';
@@ -25,6 +26,12 @@
   // View state
   let _xRange: [number, number] = [0, 10];
   let _fullXRange: [number, number] = [0, 10];
+
+  /** Update _xRange and push to shared store so the other tab stays in sync. */
+  function setXRange(range: [number, number]) {
+    _xRange = range;
+    $viewXRange = range;
+  }
   let _playheadTime = 0;
   let _mounted = false;
   let _drawPreview: { startTime: number; endTime: number } | null = null;
@@ -656,7 +663,7 @@
         let x1 = panStartXRange[1] + xDelta;
         if (x0 < _fullXRange[0]) { x1 += _fullXRange[0] - x0; x0 = _fullXRange[0]; }
         if (x1 > _fullXRange[1]) { x0 -= x1 - _fullXRange[1]; x1 = _fullXRange[1]; }
-        _xRange = [x0, x1];
+        setXRange([x0, x1]);
         syncWaveform(_xRange, _fullXRange[1]);
         scheduleDraw();
       }
@@ -717,13 +724,13 @@
           const { delta, px } = _pendingZoom;
           _pendingZoom = null;
           const factor = Math.pow(1.002, delta);
-          const xAtMouse = pxToTime(px);
-          let x0 = xAtMouse - (xAtMouse - _xRange[0]) * factor;
-          let x1 = xAtMouse + (_xRange[1] - xAtMouse) * factor;
+          const center = _playheadTime;
+          let x0 = center - (center - _xRange[0]) * factor;
+          let x1 = center + (_xRange[1] - center) * factor;
           x0 = Math.max(_fullXRange[0], x0);
           x1 = Math.min(_fullXRange[1], x1);
           if (x1 - x0 < 0.5) return;
-          _xRange = [x0, x1];
+          setXRange([x0, x1]);
           syncWaveform(_xRange, _fullXRange[1]);
           draw();
         });
@@ -1034,8 +1041,18 @@
       const extentChanged = Math.abs(newFullX[1] - _fullXRange[1]) > 0.01;
       _fullXRange = newFullX;
       if (extentChanged) {
-        _xRange = [..._fullXRange] as [number, number];
+        setXRange([..._fullXRange] as [number, number]);
       }
+    }
+  });
+
+  // Restore shared x-range and sync waveform when switching to time tab
+  $effect(() => {
+    const tab = $activeTab;
+    if (tab === 'time' && _mounted) {
+      _xRange = [...$viewXRange] as [number, number];
+      syncWaveform(_xRange, _fullXRange[1]);
+      scheduleDraw();
     }
   });
 
@@ -1064,10 +1081,15 @@
         x1 = _fullXRange[1];
         x0 = Math.max(_fullXRange[0], x1 - span);
       }
-      _xRange = [x0, x1];
+      setXRange([x0, x1]);
       syncWaveform(_xRange, _fullXRange[1]);
     }
     scheduleDraw();
+  }
+
+  /** Update playhead time without triggering redraws (for use when tab is hidden). */
+  export function setPlayheadTime(time: number) {
+    _playheadTime = time;
   }
 
   export function syncToRange(xRange: [number, number]) {

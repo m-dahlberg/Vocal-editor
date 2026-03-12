@@ -50,6 +50,7 @@ export interface SyncResult {
   clusters: Cluster[];
   corrected_times?: number[];
   corrected_freqs?: (number | null)[];
+  timemap?: TimemapEntry[];
 }
 
 export interface SegmentResult {

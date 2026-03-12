@@ -273,7 +273,19 @@ def sync_clusters():
 
     data = request.json or {}
     incoming = data.get('clusters', [])
-    print(f"[DEBUG] sync_clusters: {len(incoming)} clusters incoming")
+
+    # Accept optional time edits so pitch tab can preserve time alignment
+    incoming_time_edits = data.get('time_edits', None)
+    if incoming_time_edits is not None:
+        SESSION['time_edits'] = [
+            {'cluster_idx': int(e['clusterIdx']), 'new_start': float(e['newStart']), 'new_end': float(e['newEnd'])}
+            for e in incoming_time_edits
+        ]
+        print(f"[DEBUG] sync_clusters: received {len(incoming_time_edits)} time_edits from client")
+    else:
+        print(f"[DEBUG] sync_clusters: no time_edits in request, SESSION has {len(SESSION['time_edits'])} stored")
+
+    print(f"[DEBUG] sync_clusters: {len(incoming)} clusters incoming, {len(SESSION['time_edits'])} time_edits active")
     if incoming:
         print(f"[DEBUG] incoming[0] keys: {list(incoming[0].keys())}")
         print(f"[DEBUG] incoming[0]: {incoming[0]}")
@@ -338,14 +350,13 @@ def sync_clusters():
 
     SESSION['clusters'] = new_clusters
 
-    # Pitch map is computed entirely server-side from cluster parameters
-    # and the original analysis frequencies stored in each cluster.
-    # The client pitch preview is a visual aid, not a source of truth.
+    # Use process_combined to apply both pitch and time edits in a single pass
     try:
-        success, msg = process_full_audio(
+        from time_engine import process_combined
+        success, msg = process_combined(
             SESSION['audio'], SESSION['sr'],
             SESSION['clusters'], SESSION['params'],
-            SESSION['corrected_path'],
+            SESSION['time_edits'], SESSION['corrected_path'],
         )
 
         if not success:
@@ -377,6 +388,17 @@ def sync_clusters():
         if corrected_times is not None:
             resp['corrected_times'] = corrected_times
             resp['corrected_freqs'] = corrected_freqs
+
+        # Return timemap if time edits are active
+        if SESSION['time_edits']:
+            from time_engine import generate_time_map
+            audio_mono = get_audio_mono(SESSION['audio'])
+            actual_timemap = generate_time_map(SESSION['clusters'], SESSION['time_edits'], SESSION['sr'], len(audio_mono))
+            resp['timemap'] = [
+                {'source_s': src / SESSION['sr'], 'target_s': tgt / SESSION['sr']}
+                for src, tgt in actual_timemap
+            ]
+
         return jsonify(resp)
 
     except Exception as e:
@@ -523,9 +545,23 @@ def serve_audio():
 
 @app.route('/api/export')
 def export_audio():
-    """Download the corrected audio file."""
+    """Download the corrected audio file, re-processing to ensure all edits are included."""
     if not SESSION['corrected_path'] or not os.path.exists(SESSION['corrected_path']):
         return jsonify({'error': 'No audio to export'}), 404
+
+    # Re-process with both pitch and time edits to ensure export is up-to-date
+    if SESSION['audio'] is not None and SESSION['clusters']:
+        try:
+            from time_engine import process_combined
+            success, msg = process_combined(
+                SESSION['audio'], SESSION['sr'],
+                SESSION['clusters'], SESSION['params'],
+                SESSION['time_edits'], SESSION['corrected_path'],
+            )
+            if not success:
+                return jsonify({'error': f'Export processing failed: {msg}'}), 500
+        except Exception as e:
+            return jsonify({'error': f'Export processing failed: {e}'}), 500
 
     original_name = Path(SESSION['audio_path']).stem if SESSION['audio_path'] else 'audio'
     download_name = f"{original_name}_corrected.wav"

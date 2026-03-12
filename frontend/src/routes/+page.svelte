@@ -307,11 +307,13 @@
   }
 
   async function processDirtyClusters() {
-    if (get(dirtyClusters).size === 0) return;
+    if (get(dirtyClusters).size === 0 && get(dirtyTimeEdits).size === 0) return;
 
     $processing = true;
     const cls = get(clusters);
-    log(`Syncing ${cls.length} cluster(s) via full-audio pass...`);
+    const currentTimeEdits = get(timeEdits);
+    const hasTimeEdits = currentTimeEdits.length > 0;
+    log(`Syncing ${cls.length} cluster(s) via full-audio pass${hasTimeEdits ? ` + ${currentTimeEdits.length} time edit(s)` : ''}...`);
 
     try {
       const clusterUpdates = cls.map((c, idx) => ({
@@ -328,7 +330,7 @@
         manually_edited: c.manually_edited || false,
       }));
 
-      const result = await api.syncClusters(clusterUpdates);
+      const result = await api.syncClusters(clusterUpdates, currentTimeEdits);
 
       if (result.error) {
         log(`Error: ${result.error}`, 'error');
@@ -341,8 +343,13 @@
         pitchPlot?.updatePitchSegment(result.corrected_times, result.corrected_freqs, -Infinity, Infinity);
       }
 
+      if (result.timemap) {
+        $backendTimemap = result.timemap;
+      }
+
       $audioUrl = api.audioUrl();
       $dirtyClusters = new Set();
+      $dirtyTimeEdits = new Set();
       refreshCorrectionCurve();
       log('All edits processed');
     } catch (e: any) {
@@ -498,82 +505,52 @@
 
   async function applyTimeEdits() {
     const edits = get(timeEdits);
-    if (edits.length === 0) {
-      log('No time edits to apply', 'warn');
+    const cls = get(clusters);
+    const hasPitchEdits = cls.some(c => c.pitch_shift_semitones !== 0 || (c.smoothing_percent ?? 0) !== 0);
+
+    console.log('[applyTimeEdits] edits:', edits.length, 'dirtyClusters:', get(dirtyClusters).size, 'dirtyTimeEdits:', get(dirtyTimeEdits).size);
+    console.log('[applyTimeEdits] edits data:', JSON.stringify(edits));
+
+    if (edits.length === 0 && get(dirtyClusters).size === 0) {
+      log('No edits to apply', 'warn');
       return;
     }
 
     $processing = true;
-    log(`Applying ${edits.length} time edit(s)...`);
+    log(`Applying ${edits.length} time edit(s)${hasPitchEdits ? ' + pitch edits' : ''}...`);
 
     try {
-      const result = await api.syncTimeEdits(edits);
+      // Use unified sync_clusters path so both pitch and time edits are applied together
+      const clusterUpdates = cls.map((c, idx) => ({
+        idx,
+        start_time: c.start_time,
+        end_time: c.end_time,
+        note: c.note,
+        mean_freq: c.mean_freq,
+        pitch_shift_semitones: c.pitch_shift_semitones,
+        ramp_in_ms: c.ramp_in_ms,
+        ramp_out_ms: c.ramp_out_ms,
+        correction_strength: c.correction_strength,
+        smoothing_percent: c.smoothing_percent,
+        manually_edited: c.manually_edited || false,
+      }));
+
+      const result = await api.syncClusters(clusterUpdates, edits);
+
       if (result.error) {
         log(`Error: ${result.error}`, 'error');
         return;
       }
+
+      $clusters = result.clusters;
       $audioUrl = api.audioUrl();
+      $dirtyClusters = new Set();
       $dirtyTimeEdits = new Set();
       if (result.timemap) {
         $backendTimemap = result.timemap;
       }
-      log('Time edits applied successfully');
-
-      // Debug: compare visual curve data vs actual backend timemap
-      if (result.timemap) {
-        const cls = get(clusters);
-        console.group('[TIME DEBUG] Visual segments vs Backend timemap');
-
-        // Visual segments: clusters + gaps
-        console.log('--- Visual segments (clusters + gaps) ---');
-        for (let i = 0; i < cls.length; i++) {
-          const edit = edits.find(e => e.clusterIdx === i);
-          const editStart = edit ? edit.newStart : cls[i].start_time;
-          const editEnd = edit ? edit.newEnd : cls[i].end_time;
-          const origDur = cls[i].end_time - cls[i].start_time;
-          const editDur = editEnd - editStart;
-          const ratio = origDur > 0 && editDur > 0 ? origDur / editDur : NaN;
-
-          // Gap before this cluster
-          if (i === 0 && editStart > 0.001) {
-            const gapOrigEnd = cls[0].start_time;
-            const gapRatio = gapOrigEnd > 0.001 && editStart > 0.001 ? gapOrigEnd / editStart : NaN;
-            console.log(`  GAP [0.000 → ${gapOrigEnd.toFixed(3)}] => [0.000 → ${editStart.toFixed(3)}] ratio=${gapRatio.toFixed(3)}`);
-          }
-          if (i > 0) {
-            const prevEdit = edits.find(e => e.clusterIdx === i - 1);
-            const prevEditEnd = prevEdit ? prevEdit.newEnd : cls[i - 1].end_time;
-            const gapOrigStart = cls[i - 1].end_time;
-            const gapOrigEnd = cls[i].start_time;
-            const gapOrigDur = gapOrigEnd - gapOrigStart;
-            const gapEditDur = editStart - prevEditEnd;
-            const gapRatio = gapOrigDur > 0.001 && gapEditDur > 0.001 ? gapOrigDur / gapEditDur : NaN;
-            console.log(`  GAP [${gapOrigStart.toFixed(3)} → ${gapOrigEnd.toFixed(3)}] => [${prevEditEnd.toFixed(3)} → ${editStart.toFixed(3)}] ratio=${gapRatio.toFixed(3)}`);
-          }
-
-          console.log(`  C${i} ${cls[i].note} [${cls[i].start_time.toFixed(3)} → ${cls[i].end_time.toFixed(3)}] => [${editStart.toFixed(3)} → ${editEnd.toFixed(3)}] ratio=${ratio.toFixed(3)}`);
-        }
-
-        console.log('--- Backend timemap (source_s → target_s) ---');
-        for (const entry of result.timemap) {
-          const delta = entry.target_s - entry.source_s;
-          console.log(`  ${entry.source_s.toFixed(3)}s → ${entry.target_s.toFixed(3)}s (delta=${delta >= 0 ? '+' : ''}${delta.toFixed(3)}s)`);
-        }
-
-        // Compute speed ratios between timemap keypoints
-        console.log('--- Backend timemap speed ratios (between keypoints) ---');
-        for (let i = 1; i < result.timemap.length; i++) {
-          const prev = result.timemap[i - 1];
-          const cur = result.timemap[i];
-          const srcDur = cur.source_s - prev.source_s;
-          const tgtDur = cur.target_s - prev.target_s;
-          const ratio = srcDur > 0.001 && tgtDur > 0.001 ? srcDur / tgtDur : NaN;
-          const log2Ratio = isNaN(ratio) ? NaN : Math.log2(ratio);
-          console.log(`  [${prev.source_s.toFixed(3)} → ${cur.source_s.toFixed(3)}] src=${srcDur.toFixed(3)}s tgt=${tgtDur.toFixed(3)}s ratio=${ratio.toFixed(3)} log2=${log2Ratio.toFixed(3)}`);
-        }
-
-        console.groupEnd();
-      }
+      refreshCorrectionCurve();
+      log('All edits applied successfully');
     } catch (e: any) {
       log(`Error: ${e}`, 'error');
     } finally {
@@ -585,8 +562,10 @@
   function onTimeUpdate(time: number) {
     if ($activeTab === 'pitch') {
       pitchPlot?.updatePlayhead(time);
+      timeAlignmentView?.setPlayheadTime(time);
     } else {
       timeAlignmentView?.updatePlayhead(time);
+      pitchPlot?.setPlayheadTime(time);
     }
   }
 

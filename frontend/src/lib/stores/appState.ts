@@ -38,6 +38,9 @@ export const dirtyTimeEdits = writable<Set<number>>(new Set());
 // Actual backend timemap (from last sync_time_edits response)
 export const backendTimemap = writable<TimemapEntry[]>([]);
 
+// Shared view range (synced between pitch and time tabs)
+export const viewXRange = writable<[number, number]>([0, 10]);
+
 // UI state
 export const audioLoaded = writable(false);
 export const midiLoaded = writable(false);

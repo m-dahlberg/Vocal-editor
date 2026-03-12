@@ -1,5 +1,6 @@
 <script lang="ts">
   import { params } from '$lib/stores/params';
+  import { clusters } from '$lib/stores/appState';
 
   interface Props {
     onAnalyze: () => void;
@@ -8,6 +9,8 @@
   }
 
   let { onAnalyze, onApplyTimeEdits, onExport }: Props = $props();
+
+  const hasPitchEdits = $derived($clusters.some(c => c.pitch_shift_semitones !== 0 || (c.smoothing_percent ?? 0) !== 0));
 </script>
 
 <aside class="param-panel">
@@ -64,9 +67,25 @@
     </div>
   </section>
 
+  {#if hasPitchEdits}
+    <div class="cross-tab-info">+ pitch edits will also be applied</div>
+  {/if}
+
   <div class="action-buttons">
     <button class="btn btn-primary" onclick={onAnalyze}>Re-analyze</button>
     <button class="btn btn-warning" onclick={onApplyTimeEdits}>Update Audio</button>
     <button class="btn btn-success" onclick={onExport}>Export</button>
   </div>
 </aside>
+
+<style>
+  .cross-tab-info {
+    padding: 4px 10px;
+    margin: 4px 8px;
+    font-size: 0.75rem;
+    color: var(--accent2, #f0a);
+    background: rgba(255, 0, 170, 0.08);
+    border-radius: 4px;
+    text-align: center;
+  }
+</style>

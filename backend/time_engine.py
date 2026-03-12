@@ -196,9 +196,16 @@ def process_time_stretch(audio, sr, clusters, time_edits, rb_params, output_path
 
 def process_combined(audio, sr, clusters, params, time_edits, output_path):
     """
-    Process audio with both pitch corrections and time stretching
-    in a single Rubberband invocation.
+    Process audio with both pitch corrections and time stretching.
+
+    Rubberband's --pitchmap implies realtime mode (-R), which conflicts with
+    --timemap (time stretching is unreliable in realtime mode).  Therefore,
+    when both are needed we run two separate passes:
+      1. Pitch correction (--pitchmap)
+      2. Time stretching on the pitch-corrected result (--timemap)
     """
+    from audio_engine import run_rubberband
+
     audio_mono = get_audio_mono(audio)
     audio_length = len(audio_mono)
     duration_s = audio_length / sr
@@ -226,15 +233,30 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
 
     try:
         if has_pitch and has_time:
-            success, msg = run_rubberband_combined(
-                temp_input, output_path, pitch_map, time_map, duration_s, rb_params
-            )
+            # Two-pass: pitch first, then time stretch on the result.
+            # This avoids the conflict between --pitchmap (realtime mode)
+            # and --timemap in a single Rubberband invocation.
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                temp_pitched = f.name
+            try:
+                success, msg = run_rubberband(
+                    audio_mono, sr, pitch_map, temp_pitched, rb_params
+                )
+                if not success:
+                    return success, msg
+
+                success, msg = run_rubberband_with_timemap(
+                    temp_pitched, output_path, time_map, duration_s, rb_params
+                )
+                return success, msg
+            finally:
+                if os.path.exists(temp_pitched):
+                    os.remove(temp_pitched)
         elif has_time:
             success, msg = run_rubberband_with_timemap(
                 temp_input, output_path, time_map, duration_s, rb_params
             )
         elif has_pitch:
-            from audio_engine import run_rubberband
             success, msg = run_rubberband(
                 audio_mono, sr, pitch_map, output_path, rb_params
             )

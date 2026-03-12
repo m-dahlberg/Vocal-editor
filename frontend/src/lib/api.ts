@@ -51,8 +51,12 @@ export async function deleteCluster(clusterIdx: number): Promise<any> {
   return post('/api/delete_cluster', { cluster_idx: clusterIdx });
 }
 
-export async function syncClusters(clusterList: Partial<Cluster>[]): Promise<SyncResult> {
-  return post('/api/sync_clusters', { clusters: clusterList });
+export async function syncClusters(clusterList: Partial<Cluster>[], timeEdits?: TimeEdit[]): Promise<SyncResult> {
+  const body: Record<string, unknown> = { clusters: clusterList };
+  if (timeEdits && timeEdits.length > 0) {
+    body.time_edits = timeEdits;
+  }
+  return post('/api/sync_clusters', body);
 }
 
 export async function resetEdits(): Promise<any> {
