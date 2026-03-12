@@ -17,6 +17,10 @@ export const params = writable<Params>({
   smoothing_threshold_cents: 0,
   smoothing_threshold_ms: 0,
   smooth_curve: 1.0,
+  max_note_stretch: 200,
+  max_note_compress: 50,
+  max_gap_stretch: 300,
+  max_gap_compress: 50,
   rb: {
     command: 'rubberband-r3',
     crisp: 3,

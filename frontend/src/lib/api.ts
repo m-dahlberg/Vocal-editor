@@ -67,6 +67,21 @@ export function audioUrl(): string {
   return `/api/audio?t=${Date.now()}`;
 }
 
+export async function uploadBacking(file: File): Promise<any> {
+  const fd = new FormData();
+  fd.append('file', file);
+  const r = await fetch('/api/upload_backing', { method: 'POST', body: fd });
+  return r.json();
+}
+
+export function referenceAudioUrl(): string {
+  return `/api/reference_audio?t=${Date.now()}`;
+}
+
+export function backingAudioUrl(): string {
+  return `/api/backing_audio?t=${Date.now()}`;
+}
+
 export function exportUrl(): string {
   return '/api/export';
 }

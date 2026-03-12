@@ -10,12 +10,13 @@
   import TimeAlignmentView from '$lib/components/TimeAlignmentView.svelte';
   import TimeAlignmentParams from '$lib/components/TimeAlignmentParams.svelte';
   import TimeClusterPanel from '$lib/components/TimeClusterPanel.svelte';
+  import MixerPanel from '$lib/components/MixerPanel.svelte';
   import * as api from '$lib/api';
   import {
     clusters, times, frequencies, originalTimes, originalFrequencies,
     midiNotes, selectedIdx, selectedIndices, dirtyClusters,
     audioLoaded, audioUrl, processing, log,
-    activeTab, timeEdits, dirtyTimeEdits
+    activeTab, timeEdits, dirtyTimeEdits, backendTimemap
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
@@ -233,6 +234,7 @@
       $dirtyClusters = new Set();
       $timeEdits = [];
       $dirtyTimeEdits = new Set();
+      $backendTimemap = [];
       $selectedIndices = new Set();
 
       refreshCorrectionCurve();
@@ -446,6 +448,52 @@
     }
   }
 
+  function deleteTimeAlignmentClusters() {
+    // Collect indices to delete: multi-select if available, otherwise single selection
+    const sel = get(selectedIndices);
+    const toDelete = sel.size > 0 ? [...sel].sort((a, b) => b - a) : ($selectedIdx !== null ? [$selectedIdx] : []);
+    if (toDelete.length === 0) return;
+
+    let cls = [...get(clusters)];
+    let edits = [...get(timeEdits)];
+    let dirty = new Set(get(dirtyClusters));
+    let dirtyTime = new Set(get(dirtyTimeEdits));
+
+    // Delete from highest index first to keep lower indices stable
+    for (const idx of toDelete) {
+      log(`Removing cluster ${idx + 1} (${cls[idx].note}) from time alignment`);
+      cls.splice(idx, 1);
+
+      // Remove time edits for this cluster and remap higher indices
+      edits = edits
+        .filter(e => e.clusterIdx !== idx)
+        .map(e => e.clusterIdx > idx ? { ...e, clusterIdx: e.clusterIdx - 1 } : e);
+
+      // Remap dirty clusters
+      const newDirty = new Set<number>();
+      for (const d of dirty) {
+        if (d < idx) newDirty.add(d);
+        else if (d > idx) newDirty.add(d - 1);
+      }
+      dirty = newDirty;
+
+      // Remap dirty time edits
+      const newDirtyTime = new Set<number>();
+      for (const d of dirtyTime) {
+        if (d < idx) newDirtyTime.add(d);
+        else if (d > idx) newDirtyTime.add(d - 1);
+      }
+      dirtyTime = newDirtyTime;
+    }
+
+    $clusters = cls;
+    $timeEdits = edits;
+    $dirtyClusters = dirty;
+    $dirtyTimeEdits = dirtyTime;
+    $selectedIdx = null;
+    $selectedIndices = new Set();
+  }
+
   // --- Time alignment callbacks ---
 
   async function applyTimeEdits() {
@@ -466,7 +514,66 @@
       }
       $audioUrl = api.audioUrl();
       $dirtyTimeEdits = new Set();
+      if (result.timemap) {
+        $backendTimemap = result.timemap;
+      }
       log('Time edits applied successfully');
+
+      // Debug: compare visual curve data vs actual backend timemap
+      if (result.timemap) {
+        const cls = get(clusters);
+        console.group('[TIME DEBUG] Visual segments vs Backend timemap');
+
+        // Visual segments: clusters + gaps
+        console.log('--- Visual segments (clusters + gaps) ---');
+        for (let i = 0; i < cls.length; i++) {
+          const edit = edits.find(e => e.clusterIdx === i);
+          const editStart = edit ? edit.newStart : cls[i].start_time;
+          const editEnd = edit ? edit.newEnd : cls[i].end_time;
+          const origDur = cls[i].end_time - cls[i].start_time;
+          const editDur = editEnd - editStart;
+          const ratio = origDur > 0 && editDur > 0 ? origDur / editDur : NaN;
+
+          // Gap before this cluster
+          if (i === 0 && editStart > 0.001) {
+            const gapOrigEnd = cls[0].start_time;
+            const gapRatio = gapOrigEnd > 0.001 && editStart > 0.001 ? gapOrigEnd / editStart : NaN;
+            console.log(`  GAP [0.000 → ${gapOrigEnd.toFixed(3)}] => [0.000 → ${editStart.toFixed(3)}] ratio=${gapRatio.toFixed(3)}`);
+          }
+          if (i > 0) {
+            const prevEdit = edits.find(e => e.clusterIdx === i - 1);
+            const prevEditEnd = prevEdit ? prevEdit.newEnd : cls[i - 1].end_time;
+            const gapOrigStart = cls[i - 1].end_time;
+            const gapOrigEnd = cls[i].start_time;
+            const gapOrigDur = gapOrigEnd - gapOrigStart;
+            const gapEditDur = editStart - prevEditEnd;
+            const gapRatio = gapOrigDur > 0.001 && gapEditDur > 0.001 ? gapOrigDur / gapEditDur : NaN;
+            console.log(`  GAP [${gapOrigStart.toFixed(3)} → ${gapOrigEnd.toFixed(3)}] => [${prevEditEnd.toFixed(3)} → ${editStart.toFixed(3)}] ratio=${gapRatio.toFixed(3)}`);
+          }
+
+          console.log(`  C${i} ${cls[i].note} [${cls[i].start_time.toFixed(3)} → ${cls[i].end_time.toFixed(3)}] => [${editStart.toFixed(3)} → ${editEnd.toFixed(3)}] ratio=${ratio.toFixed(3)}`);
+        }
+
+        console.log('--- Backend timemap (source_s → target_s) ---');
+        for (const entry of result.timemap) {
+          const delta = entry.target_s - entry.source_s;
+          console.log(`  ${entry.source_s.toFixed(3)}s → ${entry.target_s.toFixed(3)}s (delta=${delta >= 0 ? '+' : ''}${delta.toFixed(3)}s)`);
+        }
+
+        // Compute speed ratios between timemap keypoints
+        console.log('--- Backend timemap speed ratios (between keypoints) ---');
+        for (let i = 1; i < result.timemap.length; i++) {
+          const prev = result.timemap[i - 1];
+          const cur = result.timemap[i];
+          const srcDur = cur.source_s - prev.source_s;
+          const tgtDur = cur.target_s - prev.target_s;
+          const ratio = srcDur > 0.001 && tgtDur > 0.001 ? srcDur / tgtDur : NaN;
+          const log2Ratio = isNaN(ratio) ? NaN : Math.log2(ratio);
+          console.log(`  [${prev.source_s.toFixed(3)} → ${cur.source_s.toFixed(3)}] src=${srcDur.toFixed(3)}s tgt=${tgtDur.toFixed(3)}s ratio=${ratio.toFixed(3)} log2=${log2Ratio.toFixed(3)}`);
+        }
+
+        console.groupEnd();
+      }
     } catch (e: any) {
       log(`Error: ${e}`, 'error');
     } finally {
@@ -492,22 +599,36 @@
   }
 
   // --- Keyboard shortcuts ---
+  function isTextInput(el: EventTarget | null): boolean {
+    if (!el || !(el instanceof HTMLElement)) return false;
+    if (el.tagName === 'TEXTAREA' || el.isContentEditable) return true;
+    if (el.tagName === 'INPUT') {
+      const type = (el as HTMLInputElement).type;
+      return type !== 'range' && type !== 'checkbox' && type !== 'radio' && type !== 'button';
+    }
+    return false;
+  }
+
   function onKeyDown(e: KeyboardEvent) {
-    if (e.code === 'Space' && (e.target as HTMLElement)?.tagName !== 'INPUT') {
+    if (e.code === 'Space' && !isTextInput(e.target)) {
       e.preventDefault();
       waveformPlayer?.togglePlay();
     }
 
-    if ((e.key === 'Delete' || e.key === 'Backspace') && (e.target as HTMLElement)?.tagName !== 'INPUT') {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !isTextInput(e.target)) {
       if ($selectedIdx !== null) {
         e.preventDefault();
-        deleteSelectedCluster();
+        if ($activeTab === 'pitch') {
+          deleteSelectedCluster();
+        } else if ($activeTab === 'time') {
+          deleteTimeAlignmentClusters();
+        }
       }
     }
   }
 </script>
 
-<svelte:window onkeydown={onKeyDown} />
+<svelte:window onkeydowncapture={onKeyDown} />
 
 <Header />
 <HelpModal />
@@ -562,9 +683,30 @@
     <LogPanel />
   </main>
 
-  {#if $activeTab === 'pitch'}
-    <ClusterPanel {onClusterParamChange} />
-  {:else}
-    <TimeClusterPanel />
-  {/if}
+  <div class="right-panel">
+    {#if $activeTab === 'pitch'}
+      <ClusterPanel {onClusterParamChange} />
+    {:else}
+      <TimeClusterPanel />
+    {/if}
+    <MixerPanel />
+  </div>
 </div>
+
+<style>
+  .right-panel {
+    display: flex;
+    flex-direction: column;
+    width: var(--panel-w);
+    flex-shrink: 0;
+    background: var(--bg2);
+    overflow: hidden;
+  }
+
+  .right-panel :global(aside) {
+    flex: 1;
+    overflow-y: auto;
+    width: 100%;
+    border-right: none;
+  }
+</style>

@@ -93,6 +93,10 @@ export interface Params {
   smoothing_threshold_cents: number;
   smoothing_threshold_ms: number;
   smooth_curve: number;
+  max_note_stretch: number;     // max stretch as % of original (e.g. 200 = 2x)
+  max_note_compress: number;    // min size as % of original (e.g. 50 = can halve)
+  max_gap_stretch: number;      // max stretch as % of original
+  max_gap_compress: number;     // min size as % of original (0 = can fully remove)
   rb: RubberbandParams;
 }
 
@@ -111,7 +115,13 @@ export interface TimeEdit {
   newEnd: number;
 }
 
+export interface TimemapEntry {
+  source_s: number;
+  target_s: number;
+}
+
 export interface TimeStretchResult {
   ok: boolean;
   error?: string;
+  timemap?: TimemapEntry[];
 }

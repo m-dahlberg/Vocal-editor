@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { audioUrl } from '$lib/stores/appState';
+  import { audioUrl, referenceLoaded, backingLoaded, mainVolume, referenceVolume, backingVolume } from '$lib/stores/appState';
+  import { referenceAudioUrl, backingAudioUrl } from '$lib/api';
   import type { PeaksInstance, SegmentAddOptions } from 'peaks.js';
 
   interface Props {
@@ -17,11 +18,14 @@
   let totalTimeStr = $state('0:00');
   let isPlayingState = $state(false);
   let audioEl: HTMLAudioElement;
+  let referenceAudioEl: HTMLAudioElement;
+  let backingAudioEl: HTMLAudioElement;
   let zoomviewEl: HTMLDivElement;
   let mounted = false;
   let initializing = false;
   let currentUrl = '';
   let rafId: number | null = null;
+  let lastDriftCheck = 0;
 
   function formatTime(s: number): string {
     const m = Math.floor(s / 60);
@@ -36,6 +40,21 @@
       const t = peaks.player.getCurrentTime();
       playTime = formatTime(t);
       onTimeUpdate(t);
+
+      // Drift correction for secondary tracks — check every 2s, tolerate up to 150ms
+      const now = performance.now();
+      if (now - lastDriftCheck > 2000) {
+        lastDriftCheck = now;
+        for (const el of [referenceAudioEl, backingAudioEl]) {
+          if (el && !el.paused && el.readyState >= 2) {
+            const drift = Math.abs(el.currentTime - t);
+            if (drift > 0.15) {
+              el.currentTime = t;
+            }
+          }
+        }
+      }
+
       rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
@@ -68,6 +87,12 @@
     instance.on('player.seeked', (time: number) => {
       playTime = formatTime(time);
       onTimeUpdate(time);
+      // Sync secondary tracks to new position
+      for (const el of [referenceAudioEl, backingAudioEl]) {
+        if (el && el.readyState >= 2) {
+          el.currentTime = time;
+        }
+      }
     });
   }
 
@@ -79,6 +104,8 @@
       view.enableAutoScroll(false);
       view.setZoom({ seconds: 'auto' });
     }
+
+    audioEl.volume = $mainVolume;
 
     duration = instance.player.getDuration();
     totalTimeStr = formatTime(duration);
@@ -184,12 +211,62 @@
     });
   });
 
+  // Volume sync effects
+  $effect(() => {
+    const vol = $mainVolume;
+    if (audioEl) audioEl.volume = vol;
+  });
+
+  $effect(() => {
+    const vol = $referenceVolume;
+    if (referenceAudioEl) referenceAudioEl.volume = vol;
+  });
+
+  $effect(() => {
+    const vol = $backingVolume;
+    if (backingAudioEl) backingAudioEl.volume = vol;
+  });
+
+  // Load reference audio when flagged
+  $effect(() => {
+    const loaded = $referenceLoaded;
+    untrack(() => {
+      if (loaded && referenceAudioEl) {
+        referenceAudioEl.src = referenceAudioUrl();
+        referenceAudioEl.volume = $referenceVolume;
+        referenceAudioEl.load();
+      }
+    });
+  });
+
+  // Load backing audio when flagged
+  $effect(() => {
+    const loaded = $backingLoaded;
+    untrack(() => {
+      if (loaded && backingAudioEl) {
+        backingAudioEl.src = backingAudioUrl();
+        backingAudioEl.volume = $backingVolume;
+        backingAudioEl.load();
+      }
+    });
+  });
+
   export function togglePlay() {
     if (!peaks) return;
     if (isPlayingState) {
       peaks.player.pause();
+      for (const el of [referenceAudioEl, backingAudioEl]) {
+        if (el && el.readyState >= 2) el.pause();
+      }
     } else {
+      const t = peaks.player.getCurrentTime();
       peaks.player.play();
+      for (const el of [referenceAudioEl, backingAudioEl]) {
+        if (el && el.readyState >= 2) {
+          el.currentTime = t;
+          el.play();
+        }
+      }
     }
   }
 
@@ -200,6 +277,12 @@
     isPlayingState = false;
     playTime = '0:00';
     onTimeUpdate(0);
+    for (const el of [referenceAudioEl, backingAudioEl]) {
+      if (el && el.readyState >= 2) {
+        el.pause();
+        el.currentTime = 0;
+      }
+    }
   }
 
   export function seek(time: number) {
@@ -267,6 +350,8 @@
 
 <div class="waveform-container">
   <audio bind:this={audioEl} style="display:none;"></audio>
+  <audio bind:this={referenceAudioEl} style="display:none;" preload="auto"></audio>
+  <audio bind:this={backingAudioEl} style="display:none;" preload="auto"></audio>
   <div bind:this={zoomviewEl} style="width:100%;height:60px;cursor:pointer;"></div>
   <div class="transport">
     <button class="btn btn-icon play-btn" onclick={togglePlay}>{isPlayingState ? '⏸' : '▶'}</button>

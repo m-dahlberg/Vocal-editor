@@ -53,6 +53,7 @@ SESSION = {
     'time_edits': [],
     'reference_path': None,
     'reference_clusters': [],
+    'backing_path': None,
 }
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'vocal_editor'
@@ -131,6 +132,34 @@ def upload_reference():
     except Exception as e:
         import traceback
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+@app.route('/api/upload_backing', methods=['POST'])
+def upload_backing():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+
+    file = request.files['file']
+    path = UPLOAD_DIR / f"backing_{uuid.uuid4().hex}.wav"
+    file.save(str(path))
+
+    SESSION['backing_path'] = str(path)
+
+    return jsonify({'ok': True, 'filename': file.filename})
+
+
+@app.route('/api/reference_audio')
+def serve_reference_audio():
+    if not SESSION['reference_path'] or not os.path.exists(SESSION['reference_path']):
+        return jsonify({'error': 'No reference audio available'}), 404
+    return send_file(SESSION['reference_path'], mimetype='audio/wav', as_attachment=False)
+
+
+@app.route('/api/backing_audio')
+def serve_backing_audio():
+    if not SESSION['backing_path'] or not os.path.exists(SESSION['backing_path']):
+        return jsonify({'error': 'No backing audio available'}), 404
+    return send_file(SESSION['backing_path'], mimetype='audio/wav', as_attachment=False)
 
 
 @app.route('/api/upload_midi', methods=['POST'])
@@ -598,7 +627,7 @@ def sync_time_edits():
     print(f"[DEBUG] sync_time_edits: {len(time_edits)} time edits received")
 
     try:
-        from time_engine import process_combined, process_time_stretch
+        from time_engine import process_combined, process_time_stretch, generate_time_map
 
         # Check if there are also pitch edits
         has_pitch = any(
@@ -628,7 +657,18 @@ def sync_time_edits():
         corrected, _ = sf.read(SESSION['corrected_path'])
         SESSION['corrected_audio'] = get_audio_mono(corrected) if len(corrected.shape) > 1 else corrected
 
-        return jsonify({'ok': True})
+        # Return the actual timemap for frontend debugging
+        audio_mono = get_audio_mono(SESSION['audio'])
+        audio_length = len(audio_mono)
+        sr = SESSION['sr']
+        actual_timemap = generate_time_map(SESSION['clusters'], time_edits, sr, audio_length)
+        # Convert frame pairs to seconds for easy comparison
+        timemap_seconds = [
+            {'source_s': src / sr, 'target_s': tgt / sr}
+            for src, tgt in actual_timemap
+        ]
+
+        return jsonify({'ok': True, 'timemap': timemap_seconds})
 
     except Exception as e:
         import traceback

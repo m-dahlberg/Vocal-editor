@@ -29,21 +29,12 @@ def generate_time_map(clusters, time_edits, sr, audio_length):
     Source frames reference the original audio.
     Target frames reference where that audio should land in the output.
 
-    The UI constrains each edge drag to only affect the dragged cluster
-    and its immediate neighbor.  To ensure Rubberband doesn't stretch
-    audio outside that region, we add identity anchors at the outer
-    boundaries of the affected neighborhood:
-
-      For edited cluster N with neighbor N+1 also edited:
-        anchor at start of N  (or prev cluster's end)
-        keyframe N start → new start
-        keyframe N end   → new end
-        keyframe N+1 start → new start
-        keyframe N+1 end   → new end
-        anchor at end of N+1 (or next cluster's start)
-
-    Everything outside the anchors maps source==target, so it plays
-    back unchanged.
+    Anchor strategy ensures gaps absorb time changes before notes:
+      - For each edited cluster, add keyframes at its start/end
+      - For each UNEDITED neighbor, add identity anchors at BOTH its
+        start and end, so Rubberband keeps it unchanged
+      - The gap between the edited cluster and the unedited neighbor
+        will absorb all the time change
     """
     if not time_edits:
         return []
@@ -73,29 +64,25 @@ def generate_time_map(clusters, time_edits, sr, audio_length):
         keyframes.add((src_start, tgt_start))
         keyframes.add((src_end, tgt_end))
 
-        # Anchor: pin the outer boundary of the previous neighbor
-        # so nothing before the affected region moves
+        # Previous neighbor: pin both start AND end so it stays unchanged.
+        # The gap between prev.end and this cluster.start absorbs the change.
         if idx > 0 and idx - 1 not in edit_map:
             prev = clusters[idx - 1]
-            anchor = int(prev['start_time'] * sr)
-            keyframes.add((anchor, anchor))
-        elif idx > 0 and idx - 1 in edit_map:
-            pass  # neighbor is also edited, its own anchors will cover it
-        else:
-            # First cluster, pin start of file (already added)
-            pass
+            prev_start = int(prev['start_time'] * sr)
+            prev_end = int(prev['end_time'] * sr)
+            keyframes.add((prev_start, prev_start))
+            keyframes.add((prev_end, prev_end))
+        elif idx == 0:
+            pass  # start of file already anchored
 
-        # Anchor: pin the outer boundary of the next neighbor
-        # so nothing after the affected region moves
+        # Next neighbor: pin both start AND end so it stays unchanged.
+        # The gap between this cluster.end and next.start absorbs the change.
         if idx < len(clusters) - 1 and idx + 1 not in edit_map:
             nxt = clusters[idx + 1]
-            anchor = int(nxt['end_time'] * sr)
-            keyframes.add((anchor, anchor))
-        elif idx < len(clusters) - 1 and idx + 1 in edit_map:
-            pass  # neighbor is also edited, its own anchors will cover it
-        else:
-            # Last cluster, pin end of file (added below)
-            pass
+            nxt_start = int(nxt['start_time'] * sr)
+            nxt_end = int(nxt['end_time'] * sr)
+            keyframes.add((nxt_start, nxt_start))
+            keyframes.add((nxt_end, nxt_end))
 
     # End of file
     keyframes.add((audio_length - 1, audio_length - 1))

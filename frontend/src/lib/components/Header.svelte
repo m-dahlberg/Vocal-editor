@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { uploadAudio, uploadMidi, uploadReference, audioUrl as getAudioUrl } from '$lib/api';
+  import { uploadAudio, uploadMidi, uploadReference, uploadBacking, audioUrl as getAudioUrl } from '$lib/api';
   import * as api from '$lib/api';
   import {
     audioLoaded, midiLoaded, fileStatus, showHelp, showMidi, showCorrectionCurve,
     processing, clusters, times, frequencies, originalTimes, originalFrequencies,
     midiNotes, avgPitchDeviation, audioUrl, dirtyClusters, log,
-    referenceClusters, referenceLoaded
+    referenceClusters, referenceLoaded, backingLoaded
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
 
   let audioFileInput: HTMLInputElement;
   let midiFileInput: HTMLInputElement;
   let referenceFileInput: HTMLInputElement;
+  let backingFileInput: HTMLInputElement;
 
   async function handleAudioUpload(e: Event) {
     const input = e.target as HTMLInputElement;
@@ -57,6 +58,29 @@
       $referenceLoaded = true;
       $referenceClusters = result.clusters;
       log(`Reference loaded: ${file.name} (${result.cluster_count} clusters)`);
+    } catch (e: any) {
+      log(`Error: ${e}`, 'error');
+    } finally {
+      $processing = false;
+    }
+  }
+
+  async function handleBackingUpload(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    $processing = true;
+    log(`Uploading backing track ${file.name}...`);
+
+    try {
+      const result = await uploadBacking(file);
+      if (result.error) {
+        log(`Error: ${result.error}`, 'error');
+        return;
+      }
+      $backingLoaded = true;
+      log(`Backing track loaded: ${file.name}`);
     } catch (e: any) {
       log(`Error: ${e}`, 'error');
     } finally {
@@ -135,6 +159,10 @@
     <label class="btn btn-secondary">
       Reference
       <input type="file" bind:this={referenceFileInput} accept=".wav,.mp3,.flac,.aiff" hidden onchange={handleReferenceUpload}>
+    </label>
+    <label class="btn btn-secondary">
+      Backing
+      <input type="file" bind:this={backingFileInput} accept=".wav,.mp3,.flac,.aiff" hidden onchange={handleBackingUpload}>
     </label>
     <label class="btn btn-secondary">
       MIDI

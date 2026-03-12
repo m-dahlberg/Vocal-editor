@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import type { Cluster, MidiNote, LogMessage, TimeEdit } from '$lib/utils/types';
+import type { Cluster, MidiNote, LogMessage, TimeEdit, TimemapEntry } from '$lib/utils/types';
 
 // Audio/analysis state
 export const clusters = writable<Cluster[]>([]);
@@ -12,6 +12,14 @@ export const midiNotes = writable<MidiNote[]>([]);
 // Reference audio
 export const referenceClusters = writable<Cluster[]>([]);
 export const referenceLoaded = writable(false);
+
+// Backing track
+export const backingLoaded = writable(false);
+
+// Mixer volumes
+export const mainVolume = writable(1.0);
+export const referenceVolume = writable(0.5);
+export const backingVolume = writable(0.5);
 
 // Selection
 export const selectedIdx = writable<number | null>(null);
@@ -26,6 +34,9 @@ export const activeTab = writable<'pitch' | 'time'>('pitch');
 // Time alignment edits
 export const timeEdits = writable<TimeEdit[]>([]);
 export const dirtyTimeEdits = writable<Set<number>>(new Set());
+
+// Actual backend timemap (from last sync_time_edits response)
+export const backendTimemap = writable<TimemapEntry[]>([]);
 
 // UI state
 export const audioLoaded = writable(false);

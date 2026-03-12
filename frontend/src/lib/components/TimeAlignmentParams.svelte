@@ -46,6 +46,24 @@
     </div>
   </section>
 
+  <section>
+    <h3>Correction Limits</h3>
+    <div class="param-group">
+      <label>Note max stretch ({$params.max_note_stretch}%)
+        <input type="range" min="100" max="500" step="10" bind:value={$params.max_note_stretch}>
+      </label>
+      <label>Note max compress ({$params.max_note_compress}%)
+        <input type="range" min="0" max="100" step="5" bind:value={$params.max_note_compress}>
+      </label>
+      <label>Gap max stretch ({$params.max_gap_stretch}%)
+        <input type="range" min="100" max="500" step="10" bind:value={$params.max_gap_stretch}>
+      </label>
+      <label>Gap max compress ({$params.max_gap_compress}%)
+        <input type="range" min="0" max="100" step="5" bind:value={$params.max_gap_compress}>
+      </label>
+    </div>
+  </section>
+
   <div class="action-buttons">
     <button class="btn btn-primary" onclick={onAnalyze}>Re-analyze</button>
     <button class="btn btn-warning" onclick={onApplyTimeEdits}>Update Audio</button>
