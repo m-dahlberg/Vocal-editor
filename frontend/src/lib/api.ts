@@ -39,8 +39,8 @@ export async function correct(params: Params): Promise<CorrectResult> {
   return post('/api/correct', params);
 }
 
-export async function correctCluster(clusterIdx: number, updates: Partial<Cluster>): Promise<any> {
-  return post('/api/correct_cluster', { cluster_idx: clusterIdx, ...updates });
+export async function correctCluster(clusterIdx: number, allClusters: Partial<Cluster>[], timeEdits?: TimeEdit[], paddingMs?: number, crossfadeMs?: number, cropMs?: number, neighborCount?: number): Promise<any> {
+  return post('/api/correct_cluster', { cluster_idx: clusterIdx, clusters: allClusters, time_edits: timeEdits, padding_ms: paddingMs, crossfade_ms: crossfadeMs, crop_ms: cropMs, neighbor_count: neighborCount });
 }
 
 export async function analyzeSegment(startTime: number, endTime: number): Promise<SegmentResult> {
@@ -53,9 +53,7 @@ export async function deleteCluster(clusterIdx: number): Promise<any> {
 
 export async function syncClusters(clusterList: Partial<Cluster>[], timeEdits?: TimeEdit[]): Promise<SyncResult> {
   const body: Record<string, unknown> = { clusters: clusterList };
-  if (timeEdits && timeEdits.length > 0) {
-    body.time_edits = timeEdits;
-  }
+  body.time_edits = timeEdits ?? [];
   return post('/api/sync_clusters', body);
 }
 

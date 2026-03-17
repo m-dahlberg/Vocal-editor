@@ -154,15 +154,15 @@
   <div class="upload-area">
     <label class="btn btn-secondary">
       Audio
-      <input type="file" bind:this={audioFileInput} accept=".wav,.mp3,.flac,.aiff" hidden onchange={handleAudioUpload}>
+      <input type="file" bind:this={audioFileInput} accept=".wav,.mp3,.flac,.aif,.aiff" hidden onchange={handleAudioUpload}>
     </label>
     <label class="btn btn-secondary">
       Reference
-      <input type="file" bind:this={referenceFileInput} accept=".wav,.mp3,.flac,.aiff" hidden onchange={handleReferenceUpload}>
+      <input type="file" bind:this={referenceFileInput} accept=".wav,.mp3,.flac,.aif,.aiff" hidden onchange={handleReferenceUpload}>
     </label>
     <label class="btn btn-secondary">
       Backing
-      <input type="file" bind:this={backingFileInput} accept=".wav,.mp3,.flac,.aiff" hidden onchange={handleBackingUpload}>
+      <input type="file" bind:this={backingFileInput} accept=".wav,.mp3,.flac,.aif,.aiff" hidden onchange={handleBackingUpload}>
     </label>
     <label class="btn btn-secondary">
       MIDI

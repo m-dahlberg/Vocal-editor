@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { audioUrl, referenceLoaded, backingLoaded, mainVolume, referenceVolume, backingVolume } from '$lib/stores/appState';
+  import { audioUrl, referenceLoaded, backingLoaded, mainVolume, referenceVolume, backingVolume, viewXRange } from '$lib/stores/appState';
   import { referenceAudioUrl, backingAudioUrl } from '$lib/api';
   import type { PeaksInstance, SegmentAddOptions } from 'peaks.js';
 
@@ -96,20 +96,29 @@
     });
   }
 
-  function onReady(instance: PeaksInstance) {
+  function onReady(instance: PeaksInstance, restoreZoom: boolean) {
     const view = instance.views.getView('zoomview');
     if (view) {
       view.enableSeek(true);
       view.setWheelMode('none');
       view.enableAutoScroll(false);
-      view.setZoom({ seconds: 'auto' });
+      if (restoreZoom) {
+        const xRange = $viewXRange;
+        const visibleDuration = xRange[1] - xRange[0];
+        view.setZoom({ seconds: visibleDuration });
+        view.setStartTime(xRange[0]);
+      } else {
+        view.setZoom({ seconds: 'auto' });
+      }
     }
 
     audioEl.volume = $mainVolume;
 
     duration = instance.player.getDuration();
     totalTimeStr = formatTime(duration);
-    playTime = '0:00';
+    if (!restoreZoom) {
+      playTime = '0:00';
+    }
   }
 
   async function loadAudio(url: string): Promise<void> {
@@ -181,6 +190,7 @@
 
       if (peaks) {
         // Destroy old instance and reinitialize to reliably load new audio
+        const savedTime = peaks.player.getCurrentTime();
         stopPlayheadLoop();
         peaks.destroy();
         peaks = null;
@@ -190,7 +200,12 @@
           if (!mounted) { instance.destroy(); return; }
           peaks = instance;
           setupEvents(peaks);
-          onReady(peaks);
+          onReady(peaks, true);
+          // Restore playhead position
+          if (savedTime > 0) {
+            peaks.player.seek(savedTime);
+            playTime = formatTime(savedTime);
+          }
         }).catch((err) => {
           initializing = false;
           console.error('peaks.js reinit error:', err);
@@ -202,7 +217,7 @@
           if (!mounted) { instance.destroy(); return; }
           peaks = instance;
           setupEvents(peaks);
-          onReady(peaks);
+          onReady(peaks, false);
         }).catch((err) => {
           initializing = false;
           console.error('peaks.js init error:', err);

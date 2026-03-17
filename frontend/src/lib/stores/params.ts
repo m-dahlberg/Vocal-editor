@@ -17,6 +17,11 @@ export const params = writable<Params>({
   smoothing_threshold_cents: 0,
   smoothing_threshold_ms: 0,
   smooth_curve: 1.0,
+  segment_padding_ms: 300,
+  segment_crossfade_ms: 10,
+  segment_crop_ms: 50,
+  segment_neighbor_count: 0,
+  segment_auto_process: true,
   max_note_stretch: 200,
   max_note_compress: 50,
   max_gap_stretch: 300,
@@ -28,6 +33,8 @@ export const params = writable<Params>({
     pitch_hq: true,
     window_long: true,
     smoothing: true,
+    enable_pitchmap: true,
+    enable_timemap: true,
   },
 });
 

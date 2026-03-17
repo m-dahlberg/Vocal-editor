@@ -14,6 +14,18 @@ import json
 import parselmouth
 from parselmouth.praat import call
 
+def save_as_wav(uploaded_file, wav_path):
+    """Save an uploaded audio file as WAV, converting if necessary."""
+    tmp_path = str(wav_path) + '.tmp'
+    uploaded_file.save(tmp_path)
+    try:
+        data, samplerate = sf.read(tmp_path)
+        sf.write(str(wav_path), data, samplerate)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 from audio_engine import (
     analyze_pitch, cluster_notes, parse_midi_file,
     autocorrect_midi, autocorrect_standard,
@@ -94,11 +106,20 @@ def upload_audio():
 
     file = request.files['file']
     path = UPLOAD_DIR / f"audio_{uuid.uuid4().hex}.wav"
-    file.save(str(path))
+    save_as_wav(file, path)
 
+    # Full SESSION reset to prevent stale state from previous uploads
     SESSION['audio_path'] = str(path)
     SESSION['corrected_path'] = str(UPLOAD_DIR / f"corrected_{uuid.uuid4().hex}.wav")
     SESSION['params'] = get_default_params()
+    SESSION['time_edits'] = []
+    SESSION['audio'] = None
+    SESSION['sr'] = None
+    SESSION['times'] = None
+    SESSION['frequencies'] = None
+    SESSION['clusters'] = []
+    SESSION['midi_notes'] = []
+    SESSION['corrected_audio'] = None
 
     return jsonify({'ok': True, 'filename': file.filename})
 
@@ -110,7 +131,7 @@ def upload_reference():
 
     file = request.files['file']
     path = UPLOAD_DIR / f"reference_{uuid.uuid4().hex}.wav"
-    file.save(str(path))
+    save_as_wav(file, path)
 
     SESSION['reference_path'] = str(path)
 
@@ -141,7 +162,7 @@ def upload_backing():
 
     file = request.files['file']
     path = UPLOAD_DIR / f"backing_{uuid.uuid4().hex}.wav"
-    file.save(str(path))
+    save_as_wav(file, path)
 
     SESSION['backing_path'] = str(path)
 
@@ -203,6 +224,7 @@ def analyze():
 
         clusters = cluster_notes(times, frequencies, notes, audio, sr, SESSION['params'])
         SESSION['clusters'] = clusters
+        SESSION['time_edits'] = []
 
         # Copy original to corrected path
         audio_mono = get_audio_mono(audio)
@@ -274,16 +296,13 @@ def sync_clusters():
     data = request.json or {}
     incoming = data.get('clusters', [])
 
-    # Accept optional time edits so pitch tab can preserve time alignment
-    incoming_time_edits = data.get('time_edits', None)
-    if incoming_time_edits is not None:
-        SESSION['time_edits'] = [
-            {'cluster_idx': int(e['clusterIdx']), 'new_start': float(e['newStart']), 'new_end': float(e['newEnd'])}
-            for e in incoming_time_edits
-        ]
-        print(f"[DEBUG] sync_clusters: received {len(incoming_time_edits)} time_edits from client")
-    else:
-        print(f"[DEBUG] sync_clusters: no time_edits in request, SESSION has {len(SESSION['time_edits'])} stored")
+    # Always overwrite time_edits — default to empty to clear stale edits
+    incoming_time_edits = data.get('time_edits', [])
+    SESSION['time_edits'] = [
+        {'cluster_idx': int(e['clusterIdx']), 'new_start': float(e['newStart']), 'new_end': float(e['newEnd'])}
+        for e in incoming_time_edits
+    ]
+    print(f"[DEBUG] sync_clusters: received {len(incoming_time_edits)} time_edits from client")
 
     print(f"[DEBUG] sync_clusters: {len(incoming)} clusters incoming, {len(SESSION['time_edits'])} time_edits active")
     if incoming:
@@ -408,32 +427,101 @@ def sync_clusters():
 
 @app.route('/api/correct_cluster', methods=['POST'])
 def correct_cluster():
-    """Correct a single cluster and splice back into audio."""
+    """Correct a single cluster and splice back into audio.
+
+    Accepts an optional 'clusters' array to sync the full cluster list
+    before processing, ensuring the backend state matches the frontend.
+    """
     data = request.json or {}
     cluster_idx = data.get('cluster_idx')
+
+    # If a full cluster list is provided, sync it first (without processing)
+    incoming = data.get('clusters', [])
+    if incoming:
+        times = SESSION['times']
+        frequencies = SESSION['frequencies']
+        params = SESSION['params']
+        transition_ramp = params.get('transition_ramp_ms', 160)
+        correction_strength = params.get('correction_strength', 90)
+
+        new_clusters = []
+        for c in incoming:
+            start_time = float(c['start_time'])
+            end_time   = float(c['end_time'])
+
+            i_start = np.searchsorted(times, start_time, side='left')
+            i_end = np.searchsorted(times, end_time, side='right')
+            cluster_times = []
+            cluster_freqs = []
+            for j in range(i_start, i_end):
+                f = frequencies[j]
+                if not np.isnan(f) and f > 0:
+                    cluster_times.append(float(times[j]))
+                    cluster_freqs.append(float(f))
+
+            mean_freq = float(c.get('mean_freq', 0))
+            if mean_freq == 0 and cluster_freqs:
+                mean_freq = float(np.mean(cluster_freqs))
+
+            note = hz_to_note(mean_freq) or c.get('note', 'A4')
+
+            new_clusters.append({
+                'note': note,
+                'start_time': start_time,
+                'end_time': end_time,
+                'mean_freq': mean_freq,
+                'duration_ms': (end_time - start_time) * 1000,
+                'pitch_shift_semitones': float(c.get('pitch_shift_semitones', 0)),
+                'ramp_in_ms': float(c.get('ramp_in_ms', transition_ramp)),
+                'ramp_out_ms': float(c.get('ramp_out_ms', transition_ramp)),
+                'correction_strength': float(c.get('correction_strength', correction_strength)),
+                'smoothing_percent': float(c.get('smoothing_percent', 0)),
+                'manually_edited': bool(c.get('manually_edited', False)),
+                'times': cluster_times,
+                'frequencies': cluster_freqs,
+            })
+            new_clusters[-1]['pitch_variation_cents'] = compute_cluster_pitch_variation(new_clusters[-1])
+
+        SESSION['clusters'] = new_clusters
 
     if cluster_idx is None or cluster_idx >= len(SESSION['clusters']):
         return jsonify({'error': 'Invalid cluster index'}), 400
 
-    # Update cluster parameters
+    # Update cluster parameters from top-level fields (backwards compat)
     cluster = SESSION['clusters'][cluster_idx]
-    if 'pitch_shift_semitones' in data:
+    if 'pitch_shift_semitones' in data and not incoming:
         cluster['pitch_shift_semitones'] = float(data['pitch_shift_semitones'])
-    if 'ramp_in_ms' in data:
+    if 'ramp_in_ms' in data and not incoming:
         cluster['ramp_in_ms'] = float(data['ramp_in_ms'])
-    if 'ramp_out_ms' in data:
+    if 'ramp_out_ms' in data and not incoming:
         cluster['ramp_out_ms'] = float(data['ramp_out_ms'])
-    if 'correction_strength' in data:
+    if 'correction_strength' in data and not incoming:
         cluster['correction_strength'] = float(data['correction_strength'])
-    if 'smoothing_percent' in data:
+    if 'smoothing_percent' in data and not incoming:
         cluster['smoothing_percent'] = float(data['smoothing_percent'])
     cluster['manually_edited'] = True
+
+    # Sync time edits if provided
+    incoming_time_edits = data.get('time_edits', None)
+    if incoming_time_edits is not None:
+        SESSION['time_edits'] = [
+            {'cluster_idx': int(e['clusterIdx']), 'new_start': float(e['newStart']), 'new_end': float(e['newEnd'])}
+            for e in incoming_time_edits
+        ]
+
+    padding_ms = float(data.get('padding_ms', 300))
+    crossfade_ms = float(data.get('crossfade_ms', 10))
+    crop_ms = float(data.get('crop_ms', 5))
+    neighbor_count = int(data.get('neighbor_count', 0))
 
     try:
         result_audio, msg = process_segment(
             SESSION['audio'], SESSION['sr'],
             SESSION['clusters'], cluster_idx,
-            SESSION['params'], SESSION['corrected_path']
+            SESSION['params'], SESSION['corrected_path'],
+            time_edits=SESSION.get('time_edits', []),
+            padding_ms=padding_ms, crossfade_ms=crossfade_ms,
+            crop_ms=crop_ms, neighbor_count=neighbor_count
         )
 
         if result_audio is None:
@@ -442,9 +530,37 @@ def correct_cluster():
         SESSION['corrected_audio'] = result_audio
         sf.write(SESSION['corrected_path'], result_audio, int(SESSION['sr']))
 
+        # Re-analyze pitch in the processed region
+        buffer_s = padding_ms / 1000.0
+        seg_start_time = max(0, cluster['start_time'] - buffer_s)
+        seg_end_time = min(len(result_audio) / SESSION['sr'], cluster['end_time'] + buffer_s)
+
+        seg_times = []
+        seg_freqs = []
+        try:
+            start_sample = int(seg_start_time * SESSION['sr'])
+            end_sample = int(seg_end_time * SESSION['sr'])
+            audio_segment = result_audio[start_sample:end_sample]
+            sound_segment = parselmouth.Sound(audio_segment, sampling_frequency=SESSION['sr'])
+            time_step = SESSION['params'].get('time_resolution_ms', 20) / 1000.0
+            min_freq = SESSION['params'].get('min_frequency', 75)
+            max_freq = SESSION['params'].get('max_frequency', 600)
+            pitch_obj = call(sound_segment, "To Pitch", time_step, min_freq, max_freq)
+            time_values = pitch_obj.xs()
+            for t in time_values:
+                f0 = call(pitch_obj, "Get value at time", t, "Hertz", "Linear")
+                seg_freqs.append(float(f0) if (f0 is not None and not np.isnan(f0) and f0 > 0) else None)
+            seg_times = (time_values + seg_start_time).tolist()
+        except Exception:
+            pass  # Non-critical: pitch re-analysis failure shouldn't block the response
+
         return jsonify({
             'ok': True,
             'cluster': clusters_to_json(SESSION['clusters'])[cluster_idx],
+            'times': seg_times,
+            'frequencies': seg_freqs,
+            'start_time': seg_start_time,
+            'end_time': seg_end_time,
         })
 
     except Exception as e:
@@ -522,10 +638,11 @@ def analyze_segment():
 
 @app.route('/api/reset_edits', methods=['POST'])
 def reset_edits():
-    """Reset all manual edits."""
+    """Reset all manual edits (pitch and time)."""
     for cluster in SESSION['clusters']:
         cluster['manually_edited'] = False
         cluster['pitch_shift_semitones'] = 0.0
+    SESSION['time_edits'] = []
 
     return jsonify({'ok': True, 'clusters': clusters_to_json(SESSION['clusters'])})
 

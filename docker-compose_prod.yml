@@ -1,0 +1,22 @@
+services:
+  backend-prod:
+    build: ./backend
+    environment:
+      - FLASK_HOST=0.0.0.0
+    volumes:
+      - vocal-editor-prod-tmp:/tmp/vocal_editor
+    restart: unless-stopped
+
+  frontend-prod:
+    build: ./frontend
+    ports:
+      - "3001:3000"
+    environment:
+      - API_BACKEND=http://backend:5000
+      - BODY_SIZE_LIMIT=104857600
+    depends_on:
+      - backend-prod
+    restart: unless-stopped
+
+volumes:
+  vocal-editor-prod-tmp:

@@ -46,6 +46,12 @@
       <label class="checkbox-label">
         <input type="checkbox" bind:checked={$params.rb.smoothing}> Smoothing
       </label>
+      <label class="checkbox-label">
+        <input type="checkbox" bind:checked={$params.rb.enable_pitchmap}> Enable pitchmap
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" bind:checked={$params.rb.enable_timemap}> Enable timemap
+      </label>
     </div>
   </section>
 

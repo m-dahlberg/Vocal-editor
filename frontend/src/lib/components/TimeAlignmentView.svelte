@@ -14,9 +14,10 @@
     onDrawBox: (start: number, end: number) => void;
     syncWaveform: (xRange: [number, number], totalDuration: number) => void;
     onSeek?: (time: number) => void;
+    onEditComplete?: () => void;
   }
 
-  let { onClusterSelect, onDrawBox, syncWaveform, onSeek }: Props = $props();
+  let { onClusterSelect, onDrawBox, syncWaveform, onSeek, onEditComplete }: Props = $props();
 
   let canvasEl: HTMLCanvasElement;
   let containerEl: HTMLDivElement;
@@ -672,7 +673,10 @@
     window.addEventListener('mouseup', (e: MouseEvent) => {
       if (mode === 'move-drag') {
         canvasEl.style.cursor = '';
-        // If no actual drag happened, it was just a click-select (already handled in mousedown)
+        if (hasMoved) onEditComplete?.();
+      } else if (mode === 'edge-drag') {
+        canvasEl.style.cursor = '';
+        if (hasMoved) onEditComplete?.();
       } else if (mode === 'draw-box') {
         if (hasMoved && drawStartTime !== null) {
           const rect = canvasEl.getBoundingClientRect();

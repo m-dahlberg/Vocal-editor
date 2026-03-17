@@ -226,6 +226,12 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
     )
     has_time = len(time_map) > 0
 
+    # Respect enable_pitchmap / enable_timemap flags from rubberband params
+    if not rb_params.get('enable_pitchmap', True):
+        has_pitch = False
+    if not rb_params.get('enable_timemap', True):
+        has_time = False
+
     # Write input to temp file
     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
         temp_input = f.name

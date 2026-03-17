@@ -973,65 +973,222 @@ def process_full_audio(audio, sr, clusters, params, output_path):
     return success, msg
 
 
-def process_segment(audio, sr, clusters, cluster_idx, params, corrected_audio_path):
+def _scope_pitch_map_to_segment(pitch_map, seg_start_sample, seg_end_sample):
+    """Filter and translate a full-audio pitch map to segment-relative frames.
+
+    Interpolates shift values at segment boundaries so the scoped map
+    covers [0, seg_length-1] with correct shift at the edges.
     """
-    Process a single cluster + buffer, splice back into corrected audio with crossfade.
-    Returns updated corrected audio array.
+    seg_length = seg_end_sample - seg_start_sample
+    if seg_length <= 0:
+        return [(0, 0.0)]
+
+    # Sort by frame
+    pm = sorted(pitch_map, key=lambda x: x[0])
+
+    # Interpolate shift at a given frame
+    def interp_shift(frame):
+        if frame <= pm[0][0]:
+            return pm[0][1]
+        if frame >= pm[-1][0]:
+            return pm[-1][1]
+        for i in range(len(pm) - 1):
+            f0, s0 = pm[i]
+            f1, s1 = pm[i + 1]
+            if f0 <= frame <= f1:
+                if f1 == f0:
+                    return s0
+                t = (frame - f0) / (f1 - f0)
+                return s0 + t * (s1 - s0)
+        return 0.0
+
+    result = []
+    # Add interpolated boundary at segment start
+    result.append((0, interp_shift(seg_start_sample)))
+
+    # Add entries that fall within the segment
+    for frame, shift in pm:
+        if seg_start_sample < frame < seg_end_sample:
+            result.append((frame - seg_start_sample, shift))
+
+    # Add interpolated boundary at segment end
+    result.append((seg_length - 1, interp_shift(seg_end_sample)))
+
+    # Deduplicate by frame
+    seen = set()
+    deduped = []
+    for frame, shift in result:
+        if frame not in seen:
+            seen.add(frame)
+            deduped.append((frame, shift))
+
+    return sorted(deduped, key=lambda x: x[0])
+
+
+def _scope_time_map_to_segment(time_map, seg_start_sample, seg_end_sample):
+    """Filter and translate a full-audio time map to segment-relative frames.
+
+    Interpolates target frames at segment boundaries.
     """
+    seg_length = seg_end_sample - seg_start_sample
+    if seg_length <= 0 or not time_map:
+        return []
+
+    tm = sorted(time_map, key=lambda x: x[0])
+
+    def interp_target(src_frame):
+        if src_frame <= tm[0][0]:
+            return tm[0][1]
+        if src_frame >= tm[-1][0]:
+            return tm[-1][1]
+        for i in range(len(tm) - 1):
+            s0, t0 = tm[i]
+            s1, t1 = tm[i + 1]
+            if s0 <= src_frame <= s1:
+                if s1 == s0:
+                    return t0
+                frac = (src_frame - s0) / (s1 - s0)
+                return t0 + frac * (t1 - t0)
+        return src_frame  # fallback: identity
+
+    result = []
+    # Boundary at segment start
+    tgt_at_start = interp_target(seg_start_sample)
+    result.append((0, int(tgt_at_start - interp_target(seg_start_sample))))  # relative 0 -> 0
+
+    # Interior entries
+    tgt_offset = interp_target(seg_start_sample)
+    result = [(0, 0)]
+    for src, tgt in tm:
+        if seg_start_sample < src < seg_end_sample:
+            result.append((src - seg_start_sample, int(tgt - tgt_offset)))
+
+    # Boundary at segment end
+    tgt_at_end = interp_target(seg_end_sample)
+    result.append((seg_length - 1, int(tgt_at_end - tgt_offset)))
+
+    # Deduplicate
+    seen = set()
+    deduped = []
+    for src, tgt in result:
+        if src not in seen:
+            seen.add(src)
+            deduped.append((src, tgt))
+
+    return sorted(deduped, key=lambda x: x[0])
+
+
+def process_segment(audio, sr, clusters, cluster_idx, params, corrected_audio_path,
+                    time_edits=None, padding_ms=300, crossfade_ms=10, crop_ms=5,
+                    neighbor_count=0):
+    """
+    Process a single cluster + padding using the full pitch/time map pipeline,
+    scoped to the segment region. Splice back into corrected audio with crossfade.
+
+    Uses generate_pitch_map (with smoothing, ramps, neighbor overlap logic)
+    and generate_time_map so results match the full Update Audio pipeline.
+    """
+    from time_engine import generate_time_map, run_rubberband_with_timemap
+
     audio_mono = get_audio_mono(audio)
-    buffer_s = 0.3  # 300ms buffer each side
-    crossfade_s = CROSSFADE_MS / 1000.0
+    audio_length = len(audio_mono)
+    buffer_s = padding_ms / 1000.0
+    crossfade_s = crossfade_ms / 1000.0
     crossfade_samples = int(crossfade_s * sr)
 
-    cluster = clusters[cluster_idx]
-    seg_start = max(0, cluster["start_time"] - buffer_s)
-    seg_end = min(len(audio_mono) / sr, cluster["end_time"] + buffer_s)
+    first_idx = max(0, cluster_idx - neighbor_count)
+    last_idx = min(len(clusters) - 1, cluster_idx + neighbor_count)
+    seg_start = max(0, clusters[first_idx]["start_time"] - buffer_s)
+    seg_end = min(len(audio_mono) / sr, clusters[last_idx]["end_time"] + buffer_s)
 
     seg_start_sample = int(seg_start * sr)
     seg_end_sample = int(seg_end * sr)
     segment = audio_mono[seg_start_sample:seg_end_sample]
-
-    # Build pitch map relative to segment
     seg_length = len(segment)
-    shift = cluster["pitch_shift_semitones"]
-    ramp_in_frames = int((cluster.get("ramp_in_ms", DEFAULT_TRANSITION_RAMP_MS) / 1000.0) * sr)
-    ramp_out_frames = int((cluster.get("ramp_out_ms", DEFAULT_TRANSITION_RAMP_MS) / 1000.0) * sr)
 
-    # Convert cluster times to segment-relative frames
-    start_frame = int((cluster["start_time"] - seg_start) * sr)
-    end_frame = int((cluster["end_time"] - seg_start) * sr)
-    start_frame = max(0, start_frame)
-    end_frame = min(seg_length - 1, end_frame)
+    # --- Generate full pitch map using the same logic as Update Audio ---
+    gap_threshold = params.get("gap_threshold_ms", DEFAULT_GAP_THRESHOLD_MS)
+    smooth_curve = params.get("smooth_curve", DEFAULT_SMOOTH_CURVE)
+    full_pitch_map = generate_pitch_map(clusters, sr, audio_length, gap_threshold, smooth_curve)
 
-    # Ramp zones are entirely outside the cluster
-    ramp_in_start = max(0, start_frame - ramp_in_frames)
-    ramp_out_end = min(seg_length - 1, end_frame + ramp_out_frames)
+    # Scope pitch map to segment
+    pitch_map = _scope_pitch_map_to_segment(full_pitch_map, seg_start_sample, seg_end_sample)
 
-    pitch_map = [
-        (0, 0.0),
-        (ramp_in_start, 0.0),
-        (start_frame, shift),
-        (end_frame, shift),
-        (ramp_out_end, 0.0),
-        (seg_length - 1, 0.0),
-    ]
-    pitch_map = sorted(set(pitch_map), key=lambda x: x[0])
+    has_pitch = any(
+        c["pitch_shift_semitones"] != 0 or c.get("smoothing_percent", 0) != 0
+        for c in clusters
+    )
+    # Only need pitch pass if the scoped map has non-zero shifts
+    has_pitch = has_pitch and any(abs(s) > 1e-6 for _, s in pitch_map)
 
-    # Process segment
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        processed_path = f.name
+    # --- Generate and scope time map ---
+    full_time_map = generate_time_map(clusters, time_edits or [], sr, audio_length)
+    has_time = len(full_time_map) > 0
+
+    if has_time:
+        seg_time_map = _scope_time_map_to_segment(full_time_map, seg_start_sample, seg_end_sample)
+        has_time = len(seg_time_map) > 2 or any(src != tgt for src, tgt in seg_time_map)
 
     rb_params = params.get("rb", {})
-    success, msg = run_rubberband(segment, sr, pitch_map, processed_path, rb_params)
 
-    if not success:
-        if os.path.exists(processed_path):
-            os.remove(processed_path)
-        return None, msg
+    # Respect enable flags
+    if not rb_params.get('enable_pitchmap', True):
+        has_pitch = False
+    if not rb_params.get('enable_timemap', True):
+        has_time = False
 
-    # Load processed segment
-    processed_seg, _ = sf.read(processed_path)
-    os.remove(processed_path)
+    # --- Pass 1: Pitch correction ---
+    if has_pitch:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            pitch_output = f.name
+        success, msg = run_rubberband(segment, sr, pitch_map, pitch_output, rb_params)
+        if not success:
+            if os.path.exists(pitch_output):
+                os.remove(pitch_output)
+            return None, msg
+        pitched_seg, _ = sf.read(pitch_output)
+        os.remove(pitch_output)
+        if len(pitched_seg.shape) > 1:
+            pitched_seg = pitched_seg.mean(axis=1)
+    else:
+        pitched_seg = segment
+
+    # --- Pass 2: Time stretching (on the pitch-corrected segment) ---
+    if has_time:
+        duration_s = len(pitched_seg) / sr
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            time_input = f.name
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            time_output = f.name
+
+        sf.write(time_input, pitched_seg, int(sr))
+
+        try:
+            success, msg = run_rubberband_with_timemap(
+                time_input, time_output, seg_time_map, duration_s, rb_params
+            )
+            if not success:
+                return None, msg
+
+            processed_seg, _ = sf.read(time_output)
+            if len(processed_seg.shape) > 1:
+                processed_seg = processed_seg.mean(axis=1)
+        finally:
+            for f in [time_input, time_output]:
+                if os.path.exists(f):
+                    os.remove(f)
+    else:
+        processed_seg = pitched_seg
+
+    # Crop: discard crop_ms from each end of the processed segment
+    # to remove Rubberband windowing artifacts, then adjust splice boundaries
+    crop_samples = int((crop_ms / 1000.0) * sr)
+    if crop_samples > 0 and len(processed_seg) > 2 * crop_samples:
+        processed_seg = processed_seg[crop_samples:-crop_samples]
+        seg_start_sample += crop_samples
+        seg_end_sample -= crop_samples
+        seg_length = len(processed_seg)
 
     # Load current corrected audio
     if os.path.exists(corrected_audio_path):
@@ -1039,13 +1196,10 @@ def process_segment(audio, sr, clusters, cluster_idx, params, corrected_audio_pa
     else:
         corrected = audio_mono.copy()
 
-    # Ensure mono
-    if len(processed_seg.shape) > 1:
-        processed_seg = processed_seg.mean(axis=1)
     if len(corrected.shape) > 1:
         corrected = corrected.mean(axis=1)
 
-    # Trim/pad processed segment to match original segment length
+    # Trim/pad processed segment to match cropped segment length
     if len(processed_seg) > seg_length:
         processed_seg = processed_seg[:seg_length]
     elif len(processed_seg) < seg_length:

@@ -1,12 +1,17 @@
 <script lang="ts">
   import { selectedCluster, selectedIdx, selectedIndices, clusters, dirtyClusters } from '$lib/stores/appState';
+  import { params } from '$lib/stores/params';
   import type { Cluster } from '$lib/utils/types';
 
   interface Props {
     onClusterParamChange: () => void;
+    onProcessSegment: () => void;
+    onEditComplete: () => void;
   }
 
-  let { onClusterParamChange }: Props = $props();
+  let { onClusterParamChange, onProcessSegment, onEditComplete }: Props = $props();
+
+  let processingSegment = $state(false);
 
   let rampIn = $state(0);
   let rampOut = $state(0);
@@ -110,26 +115,99 @@
       <div class="cluster-param-row">
         <label>Ramp in (ms)</label>
         <div class="slider-input-pair">
-          <input type="range" min="0" max="1000" bind:value={rampIn} oninput={applyLive}>
-          <input type="number" bind:value={rampIn} min="0" oninput={applyLive}>
+          <input type="range" min="0" max="1000" bind:value={rampIn} oninput={applyLive} onchange={onEditComplete}>
+          <input type="number" bind:value={rampIn} min="0" oninput={applyLive} onchange={onEditComplete}>
         </div>
       </div>
       <div class="cluster-param-row">
         <label>Ramp out (ms)</label>
         <div class="slider-input-pair">
-          <input type="range" min="0" max="1000" bind:value={rampOut} oninput={applyLive}>
-          <input type="number" bind:value={rampOut} min="0" oninput={applyLive}>
+          <input type="range" min="0" max="1000" bind:value={rampOut} oninput={applyLive} onchange={onEditComplete}>
+          <input type="number" bind:value={rampOut} min="0" oninput={applyLive} onchange={onEditComplete}>
         </div>
       </div>
       <div class="cluster-param-row">
         <label>Smoothing (%)</label>
         <div class="slider-input-pair">
-          <input type="range" min="0" max="100" bind:value={smoothing} oninput={applyLive}>
-          <input type="number" bind:value={smoothing} min="0" max="100" oninput={applyLive}>
+          <input type="range" min="0" max="100" bind:value={smoothing} oninput={applyLive} onchange={onEditComplete}>
+          <input type="number" bind:value={smoothing} min="0" max="100" oninput={applyLive} onchange={onEditComplete}>
         </div>
       </div>
+
+      <div style="margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px;">
+        <div style="font-size:0.75rem; color:var(--accent2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;">Segment processing</div>
+      </div>
+      <div class="cluster-param-row">
+        <label>Padding (ms)</label>
+        <div class="slider-input-pair">
+          <input type="range" min="0" max="1000" bind:value={$params.segment_padding_ms}>
+          <input type="number" bind:value={$params.segment_padding_ms} min="0" max="1000">
+        </div>
+      </div>
+      <div class="cluster-param-row">
+        <label>Crossfade (ms)</label>
+        <div class="slider-input-pair">
+          <input type="range" min="1" max="100" bind:value={$params.segment_crossfade_ms}>
+          <input type="number" bind:value={$params.segment_crossfade_ms} min="1" max="100">
+        </div>
+      </div>
+      <div class="cluster-param-row">
+        <label>Crop (ms)</label>
+        <div class="slider-input-pair">
+          <input type="range" min="0" max="100" bind:value={$params.segment_crop_ms}>
+          <input type="number" bind:value={$params.segment_crop_ms} min="0" max="100">
+        </div>
+      </div>
+
+      <div class="cluster-param-row">
+        <label>Neighbors</label>
+        <div class="slider-input-pair">
+          <input type="range" min="0" max="5" bind:value={$params.segment_neighbor_count}>
+          <input type="number" bind:value={$params.segment_neighbor_count} min="0" max="5">
+        </div>
+      </div>
+
+      <div class="cluster-param-row" style="margin-top:4px;">
+        <label>
+          <input type="checkbox" bind:checked={$params.segment_auto_process}>
+          Auto process
+        </label>
+      </div>
+
+      <button
+        class="process-segment-btn"
+        disabled={processingSegment}
+        onclick={async () => {
+          processingSegment = true;
+          try { await onProcessSegment(); } finally { processingSegment = false; }
+        }}
+      >
+        {processingSegment ? 'Processing...' : 'Process Segment'}
+      </button>
     {:else}
       <p class="placeholder">Click a note box to select it</p>
     {/if}
   </div>
 </aside>
+
+<style>
+  .process-segment-btn {
+    width: 100%;
+    margin-top: 10px;
+    padding: 6px 12px;
+    background: var(--accent);
+    color: var(--bg1);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .process-segment-btn:hover:not(:disabled) {
+    filter: brightness(1.15);
+  }
+  .process-segment-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+</style>

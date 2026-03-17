@@ -89,6 +89,7 @@
       $clusters = $clusters;
       refreshCorrectionCurve();
       log(`${batch.length} cluster(s) moved`);
+      autoProcessSegment();
     });
   }
 
@@ -100,6 +101,7 @@
     updatePitchCurveForCluster(idx);
     refreshCorrectionCurve();
     log(`Cluster ${idx + 1} resized to ${$clusters[idx].duration_ms.toFixed(0)}ms`);
+    autoProcessSegment();
   }
 
   function onClusterSmoothing(idx: number, newSmoothing: number) {
@@ -115,6 +117,7 @@
     $clusters = $clusters;
     refreshCorrectionCurve();
     log(`${indices.length} cluster(s) smoothing set to ${newSmoothing.toFixed(1)}%`);
+    autoProcessSegment();
   }
 
   function onClusterRampDrag(idx: number, rampIn: number, rampOut: number) {
@@ -131,6 +134,7 @@
     $clusters = $clusters;
     refreshCorrectionCurve();
     log(`${indices.length} cluster(s) ramp: in=${rampIn.toFixed(0)}ms, out=${rampOut.toFixed(0)}ms`);
+    autoProcessSegment();
   }
 
   function onDrawBox(startTime: number, endTime: number) {
@@ -190,6 +194,53 @@
     log(`New cluster created: ${bestNote} at ${startTime.toFixed(2)}s, ${points.length} points`);
   }
 
+  async function processSegment() {
+    const idx = $selectedIdx;
+    if (idx === null) return;
+
+    const cls = get(clusters);
+    const c = cls[idx];
+    const p = getAllParams();
+    log(`Processing segment for cluster ${idx + 1} (${c.note})...`);
+
+    try {
+      const clusterUpdates = cls.map((c, i) => ({
+        idx: i,
+        start_time: c.start_time,
+        end_time: c.end_time,
+        note: c.note,
+        mean_freq: c.mean_freq,
+        pitch_shift_semitones: c.pitch_shift_semitones,
+        ramp_in_ms: c.ramp_in_ms,
+        ramp_out_ms: c.ramp_out_ms,
+        correction_strength: c.correction_strength,
+        smoothing_percent: c.smoothing_percent,
+        manually_edited: c.manually_edited || false,
+      }));
+      const currentTimeEdits = get(timeEdits);
+      const result = await api.correctCluster(idx, clusterUpdates, currentTimeEdits, p.segment_padding_ms, p.segment_crossfade_ms, p.segment_crop_ms, p.segment_neighbor_count);
+
+      if (result.error) {
+        log(`Error: ${result.error}`, 'error');
+        return;
+      }
+
+      $audioUrl = api.audioUrl();
+      const newDirty = new Set($dirtyClusters);
+      newDirty.delete(idx);
+      $dirtyClusters = newDirty;
+
+      // Splice re-analyzed pitch data into the plot for the processed region
+      if (result.times && result.frequencies && result.start_time != null && result.end_time != null) {
+        pitchPlot?.updatePitchSegment(result.times, result.frequencies, result.start_time, result.end_time);
+      }
+
+      log(`Segment processed for cluster ${idx + 1}`);
+    } catch (e: any) {
+      log(`Error: ${e}`, 'error');
+    }
+  }
+
   function onClusterParamChange() {
     // Called when cluster panel sliders change
     const cls = get(clusters);
@@ -200,6 +251,13 @@
       updatePitchCurveForCluster(i);
     }
     refreshCorrectionCurve();
+  }
+
+  function autoProcessSegment() {
+    const p = getAllParams();
+    if (p.segment_auto_process && $selectedIdx !== null) {
+      processSegment();
+    }
   }
 
   // --- Action buttons ---
@@ -273,7 +331,7 @@
           smoothing_percent: c.smoothing_percent,
           manually_edited: c.manually_edited || false,
         }));
-        const syncResult = await api.syncClusters(clusterUpdates);
+        const syncResult = await api.syncClusters(clusterUpdates, get(timeEdits));
         if (syncResult.error) {
           log(`Error syncing: ${syncResult.error}`, 'error');
           return;
@@ -390,7 +448,7 @@
           smoothing_percent: c.smoothing_percent,
           manually_edited: c.manually_edited || false,
         }));
-        const syncResult = await api.syncClusters(clusterUpdates);
+        const syncResult = await api.syncClusters(clusterUpdates, get(timeEdits));
         if (syncResult.error) {
           log(`Error syncing: ${syncResult.error}`, 'error');
           return;
@@ -651,6 +709,7 @@
         {onDrawBox}
         {syncWaveform}
         {onSeek}
+        onEditComplete={autoProcessSegment}
       />
     </div>
 
@@ -664,9 +723,9 @@
 
   <div class="right-panel">
     {#if $activeTab === 'pitch'}
-      <ClusterPanel {onClusterParamChange} />
+      <ClusterPanel {onClusterParamChange} onProcessSegment={processSegment} onEditComplete={autoProcessSegment} />
     {:else}
-      <TimeClusterPanel />
+      <TimeClusterPanel onProcessSegment={processSegment} />
     {/if}
     <MixerPanel />
   </div>

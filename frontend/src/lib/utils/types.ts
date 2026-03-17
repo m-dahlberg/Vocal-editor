@@ -94,6 +94,11 @@ export interface Params {
   smoothing_threshold_cents: number;
   smoothing_threshold_ms: number;
   smooth_curve: number;
+  segment_padding_ms: number;
+  segment_crossfade_ms: number;
+  segment_crop_ms: number;
+  segment_neighbor_count: number;
+  segment_auto_process: boolean;
   max_note_stretch: number;     // max stretch as % of original (e.g. 200 = 2x)
   max_note_compress: number;    // min size as % of original (e.g. 50 = can halve)
   max_gap_stretch: number;      // max stretch as % of original
@@ -108,6 +113,8 @@ export interface RubberbandParams {
   pitch_hq: boolean;
   window_long: boolean;
   smoothing: boolean;
+  enable_pitchmap: boolean;
+  enable_timemap: boolean;
 }
 
 export interface TimeEdit {
