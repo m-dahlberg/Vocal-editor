@@ -104,6 +104,8 @@ export interface Params {
   max_gap_stretch: number;      // max stretch as % of original
   max_gap_compress: number;     // min size as % of original (0 = can fully remove)
   rb: RubberbandParams;
+  pitch_engine: PitchEngine;
+  sms: SMSParams;
 }
 
 export interface RubberbandParams {
@@ -116,6 +118,21 @@ export interface RubberbandParams {
   enable_pitchmap: boolean;
   enable_timemap: boolean;
 }
+
+export interface SMSParams {
+  max_harmonics: number;
+  peak_threshold: number;
+  stochastic_factor: number;
+  timbre_preserve: boolean;
+  hop_size: number;
+  synth_fft_size: number;
+  f0_error_threshold: number;
+  harm_dev_slope: number;
+  min_sine_dur: number;
+  residual_level: number;
+}
+
+export type PitchEngine = 'rubberband' | 'sms';
 
 export interface TimeEdit {
   clusterIdx: number;

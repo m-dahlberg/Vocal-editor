@@ -242,12 +242,24 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
             # Two-pass: pitch first, then time stretch on the result.
             # This avoids the conflict between --pitchmap (realtime mode)
             # and --timemap in a single Rubberband invocation.
+            engine = params.get("pitch_engine", "rubberband")
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                 temp_pitched = f.name
             try:
-                success, msg = run_rubberband(
-                    audio_mono, sr, pitch_map, temp_pitched, rb_params
-                )
+                if engine == "sms":
+                    from sms_engine import run_sms_pitch_shift
+                    sms_params = params.get("sms", {})
+                    sms_cache = params.get("_sms_cache", None)
+                    success, msg, analysis = run_sms_pitch_shift(
+                        audio_mono, sr, pitch_map, temp_pitched, sms_params,
+                        cached_analysis=sms_cache,
+                    )
+                    if analysis and "_sms_cache_ref" in params:
+                        params["_sms_cache_ref"][0] = analysis
+                else:
+                    success, msg = run_rubberband(
+                        audio_mono, sr, pitch_map, temp_pitched, rb_params
+                    )
                 if not success:
                     return success, msg
 
@@ -263,9 +275,21 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
                 temp_input, output_path, time_map, duration_s, rb_params
             )
         elif has_pitch:
-            success, msg = run_rubberband(
-                audio_mono, sr, pitch_map, output_path, rb_params
-            )
+            engine = params.get("pitch_engine", "rubberband")
+            if engine == "sms":
+                from sms_engine import run_sms_pitch_shift
+                sms_params = params.get("sms", {})
+                sms_cache = params.get("_sms_cache", None)
+                success, msg, analysis = run_sms_pitch_shift(
+                    audio_mono, sr, pitch_map, output_path, sms_params,
+                    cached_analysis=sms_cache,
+                )
+                if analysis and "_sms_cache_ref" in params:
+                    params["_sms_cache_ref"][0] = analysis
+            else:
+                success, msg = run_rubberband(
+                    audio_mono, sr, pitch_map, output_path, rb_params
+                )
         else:
             sf.write(output_path, audio_mono, int(sr))
             success, msg = True, "OK"

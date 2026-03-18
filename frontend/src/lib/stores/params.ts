@@ -36,6 +36,19 @@ export const params = writable<Params>({
     enable_pitchmap: true,
     enable_timemap: true,
   },
+  pitch_engine: 'rubberband',
+  sms: {
+    max_harmonics: 60,
+    peak_threshold: -80,
+    stochastic_factor: 0.05,
+    timbre_preserve: true,
+    hop_size: 128,
+    synth_fft_size: 2048,
+    f0_error_threshold: 5.0,
+    harm_dev_slope: 0.01,
+    min_sine_dur: 0.02,
+    residual_level: 1.0,
+  },
 });
 
 export function getAllParams(): Params {

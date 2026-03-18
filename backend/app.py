@@ -66,6 +66,7 @@ SESSION = {
     'reference_path': None,
     'reference_clusters': [],
     'backing_path': None,
+    'sms_analysis': None,
 }
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'vocal_editor'
@@ -95,7 +96,20 @@ def get_default_params():
             'pitch_hq': DEFAULT_RUBBERBAND_PITCH_HQ,
             'window_long': DEFAULT_RUBBERBAND_WINDOW_LONG,
             'smoothing': DEFAULT_RUBBERBAND_SMOOTHING,
-        }
+        },
+        'pitch_engine': 'rubberband',
+        'sms': {
+            'max_harmonics': 40,
+            'peak_threshold': -80,
+            'stochastic_factor': 0.2,
+            'timbre_preserve': True,
+            'hop_size': 256,
+            'synth_fft_size': 2048,
+            'f0_error_threshold': 5.0,
+            'harm_dev_slope': 0.01,
+            'min_sine_dur': 0.02,
+            'residual_level': 1.0,
+        },
     }
 
 
@@ -120,6 +134,7 @@ def upload_audio():
     SESSION['clusters'] = []
     SESSION['midi_notes'] = []
     SESSION['corrected_audio'] = None
+    SESSION['sms_analysis'] = None
 
     return jsonify({'ok': True, 'filename': file.filename})
 
@@ -207,10 +222,15 @@ def analyze():
     params = request.json or {}
     # Merge with current params
     for k, v in params.items():
-        if k != 'rb':
-            SESSION['params'][k] = v
-        else:
+        if k == 'rb':
             SESSION['params']['rb'].update(v)
+        elif k == 'sms':
+            SESSION['params']['sms'].update(v)
+        else:
+            SESSION['params'][k] = v
+
+    # Invalidate SMS analysis cache on re-analyze
+    SESSION['sms_analysis'] = None
 
     try:
         times, frequencies, notes, sr, audio = analyze_pitch(
@@ -260,10 +280,12 @@ def correct():
 
     params = request.json or {}
     for k, v in params.items():
-        if k != 'rb':
-            SESSION['params'][k] = v
-        else:
+        if k == 'rb':
             SESSION['params']['rb'].update(v)
+        elif k == 'sms':
+            SESSION['params']['sms'].update(v)
+        else:
+            SESSION['params'][k] = v
 
     try:
         if SESSION['midi_notes']:
@@ -295,6 +317,36 @@ def sync_clusters():
 
     data = request.json or {}
     incoming = data.get('clusters', [])
+
+    # Merge params if provided (engine selection, SMS params, etc.)
+    incoming_params = data.get('params', {})
+    if incoming_params:
+        old_sms = SESSION['params'].get('sms', {}).copy()
+        old_engine = SESSION['params'].get('pitch_engine', 'rubberband')
+        for k, v in incoming_params.items():
+            if k == 'rb':
+                SESSION['params']['rb'].update(v)
+            elif k == 'sms':
+                SESSION['params']['sms'].update(v)
+            else:
+                SESSION['params'][k] = v
+        # Invalidate SMS cache only if analysis-affecting params changed
+        # Synthesis-only params (synth_fft_size, residual_level, timbre_preserve) don't need re-analysis
+        _SMS_SYNTH_ONLY_KEYS = {'synth_fft_size', 'residual_level', 'timbre_preserve'}
+        new_sms = SESSION['params'].get('sms', {})
+        new_engine = SESSION['params'].get('pitch_engine', 'rubberband')
+        if old_engine != new_engine:
+            SESSION['sms_analysis'] = None
+            print("[SMS] Cache invalidated due to engine change")
+        elif old_sms != new_sms:
+            analysis_changed = any(
+                old_sms.get(k) != new_sms.get(k)
+                for k in set(old_sms) | set(new_sms)
+                if k not in _SMS_SYNTH_ONLY_KEYS
+            )
+            if analysis_changed:
+                SESSION['sms_analysis'] = None
+                print("[SMS] Cache invalidated due to analysis param change")
 
     # Always overwrite time_edits — default to empty to clear stale edits
     incoming_time_edits = data.get('time_edits', [])
@@ -372,11 +424,28 @@ def sync_clusters():
     # Use process_combined to apply both pitch and time edits in a single pass
     try:
         from time_engine import process_combined
+        # Pass SMS cache and Parselmouth f0 data through params for the engine to use
+        if SESSION['params'].get('pitch_engine') == 'sms':
+            SESSION['params']['_sms_cache'] = SESSION.get('sms_analysis')
+            SESSION['params']['_sms_cache_ref'] = [SESSION.get('sms_analysis')]
+            if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+                SESSION['params']['sms']['_parselmouth_f0'] = {
+                    'times': SESSION['times'],
+                    'frequencies': SESSION['frequencies'],
+                }
+
         success, msg = process_combined(
             SESSION['audio'], SESSION['sr'],
             SESSION['clusters'], SESSION['params'],
             SESSION['time_edits'], SESSION['corrected_path'],
         )
+
+        # Store updated SMS cache
+        if SESSION['params'].get('pitch_engine') == 'sms':
+            cache_ref = SESSION['params'].pop('_sms_cache_ref', [None])
+            SESSION['params'].pop('_sms_cache', None)
+            if cache_ref[0] is not None:
+                SESSION['sms_analysis'] = cache_ref[0]
 
         if not success:
             return jsonify({'error': msg}), 500
@@ -513,6 +582,14 @@ def correct_cluster():
     crossfade_ms = float(data.get('crossfade_ms', 10))
     crop_ms = float(data.get('crop_ms', 5))
     neighbor_count = int(data.get('neighbor_count', 0))
+
+    # Pass Parselmouth f0 data for SMS engine
+    if SESSION['params'].get('pitch_engine') == 'sms':
+        if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+            SESSION['params']['sms']['_parselmouth_f0'] = {
+                'times': SESSION['times'],
+                'frequencies': SESSION['frequencies'],
+            }
 
     try:
         result_audio, msg = process_segment(
@@ -670,11 +747,24 @@ def export_audio():
     if SESSION['audio'] is not None and SESSION['clusters']:
         try:
             from time_engine import process_combined
+            if SESSION['params'].get('pitch_engine') == 'sms':
+                SESSION['params']['_sms_cache'] = SESSION.get('sms_analysis')
+                SESSION['params']['_sms_cache_ref'] = [SESSION.get('sms_analysis')]
+                if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+                    SESSION['params']['sms']['_parselmouth_f0'] = {
+                        'times': SESSION['times'],
+                        'frequencies': SESSION['frequencies'],
+                    }
             success, msg = process_combined(
                 SESSION['audio'], SESSION['sr'],
                 SESSION['clusters'], SESSION['params'],
                 SESSION['time_edits'], SESSION['corrected_path'],
             )
+            if SESSION['params'].get('pitch_engine') == 'sms':
+                cache_ref = SESSION['params'].pop('_sms_cache_ref', [None])
+                SESSION['params'].pop('_sms_cache', None)
+                if cache_ref[0] is not None:
+                    SESSION['sms_analysis'] = cache_ref[0]
             if not success:
                 return jsonify({'error': f'Export processing failed: {msg}'}), 500
         except Exception as e:
@@ -693,7 +783,9 @@ def export_audio():
 
 @app.route('/api/params', methods=['GET'])
 def get_params():
-    return jsonify(SESSION['params'] if SESSION['params'] else get_default_params())
+    p = SESSION['params'] if SESSION['params'] else get_default_params()
+    # Filter out internal cache keys that aren't serializable
+    return jsonify({k: v for k, v in p.items() if not k.startswith('_')})
 
 
 @app.route('/api/delete_cluster', methods=['POST'])
@@ -712,6 +804,14 @@ def delete_cluster():
         cluster['pitch_shift_semitones'] = 0.0
         cluster['correction_strength'] = 0.0
         cluster['manually_edited'] = False
+
+        # Pass Parselmouth f0 data for SMS engine
+        if SESSION['params'].get('pitch_engine') == 'sms':
+            if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+                SESSION['params']['sms']['_parselmouth_f0'] = {
+                    'times': SESSION['times'],
+                    'frequencies': SESSION['frequencies'],
+                }
 
         result_audio, msg = process_segment(
             SESSION['audio'], SESSION['sr'],
@@ -790,11 +890,24 @@ def sync_time_edits():
 
         if has_pitch:
             # Combined pitch + time processing
+            if SESSION['params'].get('pitch_engine') == 'sms':
+                SESSION['params']['_sms_cache'] = SESSION.get('sms_analysis')
+                SESSION['params']['_sms_cache_ref'] = [SESSION.get('sms_analysis')]
+                if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+                    SESSION['params']['sms']['_parselmouth_f0'] = {
+                        'times': SESSION['times'],
+                        'frequencies': SESSION['frequencies'],
+                    }
             success, msg = process_combined(
                 SESSION['audio'], SESSION['sr'],
                 SESSION['clusters'], SESSION['params'],
                 time_edits, SESSION['corrected_path'],
             )
+            if SESSION['params'].get('pitch_engine') == 'sms':
+                cache_ref = SESSION['params'].pop('_sms_cache_ref', [None])
+                SESSION['params'].pop('_sms_cache', None)
+                if cache_ref[0] is not None:
+                    SESSION['sms_analysis'] = cache_ref[0]
         else:
             # Time-only processing
             rb_params = SESSION['params'].get('rb', {})

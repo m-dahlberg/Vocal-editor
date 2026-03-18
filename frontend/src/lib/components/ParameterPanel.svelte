@@ -48,6 +48,19 @@
   </section>
 
   <section>
+    <h3>Pitch Engine</h3>
+    <div class="param-group">
+      <label>Engine
+        <select bind:value={$params.pitch_engine}>
+          <option value="rubberband">Rubberband</option>
+          <option value="sms">SMS (Spectral Modeling)</option>
+        </select>
+      </label>
+    </div>
+  </section>
+
+  {#if $params.pitch_engine === 'rubberband'}
+  <section>
     <h3>Rubberband</h3>
     <div class="param-group">
       <label>Command<input type="text" bind:value={$params.rb.command}></label>
@@ -72,6 +85,29 @@
       </label>
     </div>
   </section>
+  {:else}
+  <section>
+    <h3>SMS Analysis</h3>
+    <div class="param-group">
+      <label>Max harmonics<input type="number" bind:value={$params.sms.max_harmonics} min="10" max="100"></label>
+      <label>Peak threshold (dB)<input type="number" bind:value={$params.sms.peak_threshold} min="-120" max="-20"></label>
+      <label>Stochastic factor<input type="number" bind:value={$params.sms.stochastic_factor} min="0.05" max="0.5" step="0.05"></label>
+      <label>Hop size (samples)<input type="number" bind:value={$params.sms.hop_size} min="64" max="1024" step="64"></label>
+      <label>Harmonic deviation slope<input type="number" bind:value={$params.sms.harm_dev_slope} min="0.001" max="0.1" step="0.005"></label>
+      <label>Min sine duration (s)<input type="number" bind:value={$params.sms.min_sine_dur} min="0.005" max="0.1" step="0.005"></label>
+    </div>
+  </section>
+  <section>
+    <h3>SMS Synthesis</h3>
+    <div class="param-group">
+      <label>Synthesis FFT size<input type="number" bind:value={$params.sms.synth_fft_size} min="512" max="8192" step="512"></label>
+      <label>Residual level<input type="number" bind:value={$params.sms.residual_level} min="0" max="1" step="0.05"></label>
+      <label class="checkbox-label">
+        <input type="checkbox" bind:checked={$params.sms.timbre_preserve}> Timbre preservation
+      </label>
+    </div>
+  </section>
+  {/if}
 
   {#if timeEditCount > 0}
     <div class="cross-tab-info">+ {timeEditCount} time edit{timeEditCount !== 1 ? 's' : ''} will also be applied</div>

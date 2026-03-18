@@ -953,13 +953,15 @@ def run_rubberband(audio_mono, sr, pitch_map, output_path, rb_params=None):
                 os.remove(f)
 
 
-def process_full_audio(audio, sr, clusters, params, output_path):
+def process_full_audio(audio, sr, clusters, params, output_path, sms_cache=None):
     """Process entire audio file with all corrections.
 
     The pitch map is always computed server-side from the cluster parameters
     and the original analysis frequencies stored in each cluster.  This avoids
     precision loss from client round-trips and keeps the server as the single
     source of truth.
+
+    Returns (success, msg) for rubberband or (success, msg, analysis) for SMS.
     """
     audio_mono = get_audio_mono(audio)
     audio_length = len(audio_mono)
@@ -967,6 +969,17 @@ def process_full_audio(audio, sr, clusters, params, output_path):
     gap_threshold = params.get("gap_threshold_ms", DEFAULT_GAP_THRESHOLD_MS)
     smooth_curve = params.get("smooth_curve", DEFAULT_SMOOTH_CURVE)
     pitch_map = generate_pitch_map(clusters, sr, audio_length, gap_threshold, smooth_curve)
+
+    engine = params.get("pitch_engine", "rubberband")
+
+    if engine == "sms":
+        from sms_engine import run_sms_pitch_shift
+        sms_params = params.get("sms", {})
+        success, msg, analysis = run_sms_pitch_shift(
+            audio_mono, sr, pitch_map, output_path, sms_params,
+            cached_analysis=sms_cache,
+        )
+        return success, msg, analysis
 
     rb_params = params.get("rb", {})
     success, msg = run_rubberband(audio_mono, sr, pitch_map, output_path, rb_params)
@@ -1138,18 +1151,37 @@ def process_segment(audio, sr, clusters, cluster_idx, params, corrected_audio_pa
         has_time = False
 
     # --- Pass 1: Pitch correction ---
+    engine = params.get("pitch_engine", "rubberband")
+
     if has_pitch:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            pitch_output = f.name
-        success, msg = run_rubberband(segment, sr, pitch_map, pitch_output, rb_params)
-        if not success:
-            if os.path.exists(pitch_output):
-                os.remove(pitch_output)
-            return None, msg
-        pitched_seg, _ = sf.read(pitch_output)
-        os.remove(pitch_output)
-        if len(pitched_seg.shape) > 1:
-            pitched_seg = pitched_seg.mean(axis=1)
+        if engine == "sms":
+            from sms_engine import run_sms_pitch_shift
+            sms_params = params.get("sms", {})
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                pitch_output = f.name
+            success, msg, _ = run_sms_pitch_shift(
+                segment, sr, pitch_map, pitch_output, sms_params
+            )
+            if not success:
+                if os.path.exists(pitch_output):
+                    os.remove(pitch_output)
+                return None, msg
+            pitched_seg, _ = sf.read(pitch_output)
+            os.remove(pitch_output)
+            if len(pitched_seg.shape) > 1:
+                pitched_seg = pitched_seg.mean(axis=1)
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                pitch_output = f.name
+            success, msg = run_rubberband(segment, sr, pitch_map, pitch_output, rb_params)
+            if not success:
+                if os.path.exists(pitch_output):
+                    os.remove(pitch_output)
+                return None, msg
+            pitched_seg, _ = sf.read(pitch_output)
+            os.remove(pitch_output)
+            if len(pitched_seg.shape) > 1:
+                pitched_seg = pitched_seg.mean(axis=1)
     else:
         pitched_seg = segment
 

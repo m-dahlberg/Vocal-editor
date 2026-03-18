@@ -388,7 +388,8 @@
         manually_edited: c.manually_edited || false,
       }));
 
-      const result = await api.syncClusters(clusterUpdates, currentTimeEdits);
+      const p = getAllParams();
+      const result = await api.syncClusters(clusterUpdates, currentTimeEdits, p);
 
       if (result.error) {
         log(`Error: ${result.error}`, 'error');
