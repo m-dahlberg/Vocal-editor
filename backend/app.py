@@ -97,7 +97,7 @@ def get_default_params():
             'window_long': DEFAULT_RUBBERBAND_WINDOW_LONG,
             'smoothing': DEFAULT_RUBBERBAND_SMOOTHING,
         },
-        'pitch_engine': 'rubberband',
+        'pitch_engine': 'fd_psola',
         'sms': {
             'max_harmonics': 40,
             'peak_threshold': -80,
@@ -117,7 +117,7 @@ def get_default_params():
         },
         'fd_psola': {
             'fft_size': 2048,
-            'window_type': 'hanning',
+            'window_type': 'kaiser',
             'formant_preservation': True,
             'formant_method': 'cepstral',
             'envelope_order': 30,

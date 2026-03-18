@@ -351,30 +351,11 @@
       $clusters = result.clusters;
 
       updateAllPitchCurves();
-      const newDirty = new Set<number>();
-      for (let i = 0; i < result.clusters.length; i++) newDirty.add(i);
-      $dirtyClusters = newDirty;
       refreshCorrectionCurve();
 
-      log('Corrections calculated — press Update Audio to apply');
-    } catch (e: any) {
-      log(`Error: ${e}`, 'error');
-    } finally {
-      $processing = false;
-    }
-  }
-
-  async function processDirtyClusters() {
-    if (get(dirtyClusters).size === 0 && get(dirtyTimeEdits).size === 0) return;
-
-    $processing = true;
-    const cls = get(clusters);
-    const currentTimeEdits = get(timeEdits);
-    const hasTimeEdits = currentTimeEdits.length > 0;
-    log(`Syncing ${cls.length} cluster(s) via full-audio pass${hasTimeEdits ? ` + ${currentTimeEdits.length} time edit(s)` : ''}...`);
-
-    try {
-      const clusterUpdates = cls.map((c, idx) => ({
+      // Apply corrections to audio
+      const cls2 = get(clusters);
+      const clusterUpdates2 = cls2.map((c, idx) => ({
         idx,
         start_time: c.start_time,
         end_time: c.end_time,
@@ -387,30 +368,23 @@
         smoothing_percent: c.smoothing_percent,
         manually_edited: c.manually_edited || false,
       }));
-
-      const p = getAllParams();
-      const result = await api.syncClusters(clusterUpdates, currentTimeEdits, p);
-
-      if (result.error) {
-        log(`Error: ${result.error}`, 'error');
+      const syncResult2 = await api.syncClusters(clusterUpdates2, get(timeEdits));
+      if (syncResult2.error) {
+        log(`Error applying: ${syncResult2.error}`, 'error');
         return;
       }
-
-      $clusters = result.clusters;
-
-      if (result.corrected_times && result.corrected_freqs) {
-        pitchPlot?.updatePitchSegment(result.corrected_times, result.corrected_freqs, -Infinity, Infinity);
+      $clusters = syncResult2.clusters;
+      if (syncResult2.corrected_times && syncResult2.corrected_freqs) {
+        pitchPlot?.updatePitchSegment(syncResult2.corrected_times, syncResult2.corrected_freqs, -Infinity, Infinity);
       }
-
-      if (result.timemap) {
-        $backendTimemap = result.timemap;
+      if (syncResult2.timemap) {
+        $backendTimemap = syncResult2.timemap;
       }
-
       $audioUrl = api.audioUrl();
       $dirtyClusters = new Set();
       $dirtyTimeEdits = new Set();
-      refreshCorrectionCurve();
-      log('All edits processed');
+
+      log('Corrections applied');
     } catch (e: any) {
       log(`Error: ${e}`, 'error');
     } finally {
@@ -676,7 +650,6 @@
     <ParameterPanel
       onAnalyze={runAnalyze}
       onCorrect={runCorrect}
-      onUpdateAudio={processDirtyClusters}
       onExport={runExport}
     />
   {:else}

@@ -5,11 +5,10 @@
   interface Props {
     onAnalyze: () => void;
     onCorrect: () => void;
-    onUpdateAudio: () => void;
     onExport: () => void;
   }
 
-  let { onAnalyze, onCorrect, onUpdateAudio, onExport }: Props = $props();
+  let { onAnalyze, onCorrect, onExport }: Props = $props();
 
   const timeEditCount = $derived($timeEdits.length);
 </script>
@@ -172,7 +171,6 @@
   <div class="action-buttons">
     <button class="btn btn-primary" onclick={onAnalyze}>Re-analyze</button>
     <button class="btn btn-primary" onclick={onCorrect}>Correct</button>
-    <button class="btn btn-warning" onclick={onUpdateAudio}>Update Audio</button>
     <button class="btn btn-success" onclick={onExport}>Export</button>
   </div>
 </aside>

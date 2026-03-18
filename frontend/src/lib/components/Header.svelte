@@ -5,7 +5,8 @@
     audioLoaded, midiLoaded, fileStatus, showHelp, showMidi, showCorrectionCurve,
     processing, clusters, times, frequencies, originalTimes, originalFrequencies,
     midiNotes, avgPitchDeviation, audioUrl, dirtyClusters, log,
-    referenceClusters, referenceLoaded, backingLoaded
+    referenceClusters, referenceLoaded, backingLoaded,
+    waveformReset, selectedIdx, selectedIndices, timeEdits, dirtyTimeEdits, backendTimemap
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
 
@@ -28,6 +29,25 @@
         log(`Error: ${result.error}`, 'error');
         return;
       }
+
+      // Reset all correction/editing state for the new file
+      $clusters = [];
+      $times = [];
+      $frequencies = [];
+      $originalTimes = [];
+      $originalFrequencies = [];
+      $midiNotes = [];
+      $dirtyClusters = new Set();
+      $timeEdits = [];
+      $dirtyTimeEdits = new Set();
+      $backendTimemap = [];
+      $selectedIdx = null;
+      $selectedIndices = new Set();
+      $avgPitchDeviation = null;
+
+      // Force waveform to fully redraw for the new file
+      $waveformReset = $waveformReset + 1;
+
       $audioLoaded = true;
       $fileStatus = `${file.name}`;
       log(`Audio uploaded: ${file.name}`);

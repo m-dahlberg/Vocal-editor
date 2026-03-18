@@ -3,7 +3,7 @@
   import {
     clusters, times, frequencies, midiNotes,
     selectedIdx, selectedIndices, showMidi, showCorrectionCurve,
-    activeTab, viewXRange
+    activeTab, viewXRange, waveformReset
   } from '$lib/stores/appState';
   import { NOTE_FREQ_MAP, getYRange, clusterDisplayFreq, boxHeight } from '$lib/utils/pitchMath';
   import { play as sinePlay, updateFrequency as sineUpdate, stop as sineStop } from '$lib/utils/sinePlayer';
@@ -44,6 +44,7 @@
   }
   let _correctionCurveTimes: (number | null)[] = [];
   let _correctionCurveCents: (number | null)[] = [];
+  let _pendingZoomReset = false;
   let _playheadSvgPath: SVGPathElement | null = null;
   let _sineTimeout: ReturnType<typeof setTimeout> | null = null;
   let _dragGhosts: HTMLDivElement[] = [];
@@ -920,6 +921,12 @@
     _findPlayheadSvg();
   });
 
+  // Flag a zoom reset when a new file is loaded
+  $effect(() => {
+    const v = $waveformReset;
+    untrack(() => { _pendingZoomReset = true; });
+  });
+
   // React to store changes
   $effect(() => {
     const t = $times;
@@ -933,17 +940,12 @@
       const newFullX: [number, number] = [0, t[t.length - 1]];
       const newFullY = getYRange(f);
 
-      // Only reset zoom when the data extent actually changes (new audio loaded),
-      // not when a segment is updated during editing
-      const extentChanged =
-        Math.abs(newFullX[1] - _fullXRange[1]) > 0.01 ||
-        Math.abs(newFullY[0] - _fullYRange[0]) > 1 ||
-        Math.abs(newFullY[1] - _fullYRange[1]) > 1;
-
       _fullXRange = newFullX;
       _fullYRange = [...newFullY] as [number, number];
 
-      if (extentChanged) {
+      // Only reset zoom when a new file was loaded, never during editing
+      if (_pendingZoomReset) {
+        _pendingZoomReset = false;
         setXRange([..._fullXRange] as [number, number]);
         _yRange = [..._fullYRange] as [number, number];
       }
@@ -956,9 +958,16 @@
 
   $effect(() => {
     // Re-render when clusters or midi change, without resetting zoom
-    void $clusters;
+    const cls = $clusters;
     void $midiNotes;
-    untrack(() => { if (Plotly && plotEl && !_interacting) _redraw(); });
+    untrack(() => {
+      // Clear correction curve overlay when clusters are empty (new file loaded)
+      if (cls.length === 0) {
+        _correctionCurveTimes = [];
+        _correctionCurveCents = [];
+      }
+      if (Plotly && plotEl && !_interacting) _redraw();
+    });
   });
 
   $effect(() => {

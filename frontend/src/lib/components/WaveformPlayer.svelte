@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { audioUrl, referenceLoaded, backingLoaded, mainVolume, referenceVolume, backingVolume, viewXRange } from '$lib/stores/appState';
+  import { audioUrl, referenceLoaded, backingLoaded, mainVolume, referenceVolume, backingVolume, viewXRange, waveformReset } from '$lib/stores/appState';
   import { referenceAudioUrl, backingAudioUrl } from '$lib/api';
   import type { PeaksInstance, SegmentAddOptions } from 'peaks.js';
 
@@ -177,6 +177,24 @@
     };
   });
 
+  // When a new file is uploaded, destroy peaks so the waveform is fully redrawn
+  $effect(() => {
+    const v = $waveformReset;
+    untrack(() => {
+      if (v === 0) return; // skip initial value
+      if (peaks) {
+        stopPlayheadLoop();
+        peaks.destroy();
+        peaks = null;
+        currentUrl = '';
+        isPlayingState = false;
+        playTime = '0:00';
+        totalTimeStr = '0:00';
+        duration = 0;
+      }
+    });
+  });
+
   $effect(() => {
     const url = $audioUrl;
 
@@ -189,26 +207,18 @@
       isPlayingState = false;
 
       if (peaks) {
-        // Destroy old instance and reinitialize to reliably load new audio
+        // Peaks.js already initialised — just swap the audio source
+        // so playback uses the corrected audio without redrawing the waveform.
         const savedTime = peaks.player.getCurrentTime();
         stopPlayheadLoop();
-        peaks.destroy();
-        peaks = null;
-        initializing = true;
-        initPeaks(url).then((instance) => {
-          initializing = false;
-          if (!mounted) { instance.destroy(); return; }
-          peaks = instance;
-          setupEvents(peaks);
-          onReady(peaks, true);
-          // Restore playhead position
+        loadAudio(url).then(() => {
+          if (!mounted || !peaks) return;
           if (savedTime > 0) {
             peaks.player.seek(savedTime);
             playTime = formatTime(savedTime);
           }
         }).catch((err) => {
-          initializing = false;
-          console.error('peaks.js reinit error:', err);
+          console.error('audio reload error:', err);
         });
       } else if (!initializing) {
         initializing = true;

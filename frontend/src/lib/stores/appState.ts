@@ -41,6 +41,9 @@ export const backendTimemap = writable<TimemapEntry[]>([]);
 // Shared view range (synced between pitch and time tabs)
 export const viewXRange = writable<[number, number]>([0, 10]);
 
+// Signal to force waveform redraw (incremented on new file upload)
+export const waveformReset = writable(0);
+
 // UI state
 export const audioLoaded = writable(false);
 export const midiLoaded = writable(false);

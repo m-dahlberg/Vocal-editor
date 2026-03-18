@@ -36,7 +36,7 @@ export const params = writable<Params>({
     enable_pitchmap: true,
     enable_timemap: true,
   },
-  pitch_engine: 'rubberband',
+  pitch_engine: 'fd_psola',
   sms: {
     max_harmonics: 60,
     peak_threshold: -80,
@@ -56,7 +56,7 @@ export const params = writable<Params>({
   },
   fd_psola: {
     fft_size: 2048,
-    window_type: 'hanning',
+    window_type: 'kaiser',
     formant_preservation: true,
     formant_method: 'cepstral',
     envelope_order: 30,

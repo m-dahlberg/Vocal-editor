@@ -115,22 +115,22 @@
       <div class="cluster-param-row">
         <label>Ramp in (ms)</label>
         <div class="slider-input-pair">
-          <input type="range" min="0" max="1000" bind:value={rampIn} oninput={applyLive} onchange={onEditComplete}>
-          <input type="number" bind:value={rampIn} min="0" oninput={applyLive} onchange={onEditComplete}>
+          <input type="range" min="0" max="1000" bind:value={rampIn} onchange={() => { applyLive(); onEditComplete(); }}>
+          <input type="number" bind:value={rampIn} min="0" onchange={() => { applyLive(); onEditComplete(); }}>
         </div>
       </div>
       <div class="cluster-param-row">
         <label>Ramp out (ms)</label>
         <div class="slider-input-pair">
-          <input type="range" min="0" max="1000" bind:value={rampOut} oninput={applyLive} onchange={onEditComplete}>
-          <input type="number" bind:value={rampOut} min="0" oninput={applyLive} onchange={onEditComplete}>
+          <input type="range" min="0" max="1000" bind:value={rampOut} onchange={() => { applyLive(); onEditComplete(); }}>
+          <input type="number" bind:value={rampOut} min="0" onchange={() => { applyLive(); onEditComplete(); }}>
         </div>
       </div>
       <div class="cluster-param-row">
         <label>Smoothing (%)</label>
         <div class="slider-input-pair">
-          <input type="range" min="0" max="100" bind:value={smoothing} oninput={applyLive} onchange={onEditComplete}>
-          <input type="number" bind:value={smoothing} min="0" max="100" oninput={applyLive} onchange={onEditComplete}>
+          <input type="range" min="0" max="100" bind:value={smoothing} onchange={() => { applyLive(); onEditComplete(); }}>
+          <input type="number" bind:value={smoothing} min="0" max="100" onchange={() => { applyLive(); onEditComplete(); }}>
         </div>
       </div>
 

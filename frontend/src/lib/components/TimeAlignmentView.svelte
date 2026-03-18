@@ -3,7 +3,7 @@
   import {
     clusters, selectedIdx, selectedIndices, timeEdits, dirtyTimeEdits,
     referenceClusters, midiNotes, showCorrectionCurve, backendTimemap,
-    activeTab, viewXRange
+    activeTab, viewXRange, waveformReset
   } from '$lib/stores/appState';
   import { params } from '$lib/stores/params';
   import ProcessingOverlay from './ProcessingOverlay.svelte';
@@ -27,6 +27,7 @@
   // View state
   let _xRange: [number, number] = [0, 10];
   let _fullXRange: [number, number] = [0, 10];
+  let _pendingZoomReset = false;
 
   /** Update _xRange and push to shared store so the other tab stays in sync. */
   function setXRange(range: [number, number]) {
@@ -1031,8 +1032,14 @@
     if (_mounted) scheduleDraw();
   });
 
+  // Flag a zoom reset when a new file is loaded
   $effect(() => {
-    // Update x range when clusters change
+    void $waveformReset;
+    _pendingZoomReset = true;
+  });
+
+  $effect(() => {
+    // Update full x range when clusters change
     const cls = $clusters;
     const refCls2 = $referenceClusters;
     const midiNts = $midiNotes;
@@ -1041,10 +1048,11 @@
       const refMax = refCls2.length > 0 ? Math.max(...refCls2.map(c => c.end_time)) : 0;
       const midiMax = midiNts.length > 0 ? Math.max(...midiNts.map(n => n.end_time)) : 0;
       const maxEnd = Math.max(mainMax, refMax, midiMax);
-      const newFullX: [number, number] = [0, maxEnd * 1.05];
-      const extentChanged = Math.abs(newFullX[1] - _fullXRange[1]) > 0.01;
-      _fullXRange = newFullX;
-      if (extentChanged) {
+      _fullXRange = [0, maxEnd * 1.05];
+
+      // Only reset zoom when a new file was loaded, never during editing
+      if (_pendingZoomReset) {
+        _pendingZoomReset = false;
         setXRange([..._fullXRange] as [number, number]);
       }
     }
