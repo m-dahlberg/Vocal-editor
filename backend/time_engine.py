@@ -265,6 +265,15 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
                         original_times=f0_data["times"] if f0_data else None,
                         original_frequencies=f0_data["frequencies"] if f0_data else None,
                     )
+                elif engine == "fd_psola":
+                    from fd_psola_engine import run_fd_psola_pitch_shift
+                    fd_psola_params = params.get("fd_psola", {})
+                    f0_data = fd_psola_params.pop("_parselmouth_f0", None)
+                    success, msg = run_fd_psola_pitch_shift(
+                        audio_mono, sr, pitch_map, temp_pitched, fd_psola_params,
+                        original_times=f0_data["times"] if f0_data else None,
+                        original_frequencies=f0_data["frequencies"] if f0_data else None,
+                    )
                 else:
                     success, msg = run_rubberband(
                         audio_mono, sr, pitch_map, temp_pitched, rb_params
@@ -301,6 +310,15 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
                 f0_data = psola_params.pop("_parselmouth_f0", None)
                 success, msg = run_psola_pitch_shift(
                     audio_mono, sr, pitch_map, output_path, psola_params,
+                    original_times=f0_data["times"] if f0_data else None,
+                    original_frequencies=f0_data["frequencies"] if f0_data else None,
+                )
+            elif engine == "fd_psola":
+                from fd_psola_engine import run_fd_psola_pitch_shift
+                fd_psola_params = params.get("fd_psola", {})
+                f0_data = fd_psola_params.pop("_parselmouth_f0", None)
+                success, msg = run_fd_psola_pitch_shift(
+                    audio_mono, sr, pitch_map, output_path, fd_psola_params,
                     original_times=f0_data["times"] if f0_data else None,
                     original_frequencies=f0_data["frequencies"] if f0_data else None,
                 )

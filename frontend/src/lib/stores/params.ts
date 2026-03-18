@@ -54,6 +54,17 @@ export const params = writable<Params>({
     max_pitch: 600,
     time_step: 0.01,
   },
+  fd_psola: {
+    fft_size: 2048,
+    window_type: 'hanning',
+    formant_preservation: true,
+    formant_method: 'cepstral',
+    envelope_order: 30,
+    overlap_factor: 4,
+    phase_mode: 'pitch_sync',
+    min_pitch: 75,
+    max_pitch: 600,
+  },
 });
 
 export function getAllParams(): Params {

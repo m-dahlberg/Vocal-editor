@@ -55,6 +55,7 @@
           <option value="rubberband">Rubberband</option>
           <option value="sms">SMS (Spectral Modeling)</option>
           <option value="psola">PSOLA (Praat)</option>
+          <option value="fd_psola">FD-PSOLA (Freq Domain)</option>
         </select>
       </label>
     </div>
@@ -93,6 +94,51 @@
       <label>Min pitch (Hz)<input type="number" bind:value={$params.psola.min_pitch} min="50" max="300"></label>
       <label>Max pitch (Hz)<input type="number" bind:value={$params.psola.max_pitch} min="200" max="1000"></label>
       <label>Time step (s)<input type="number" bind:value={$params.psola.time_step} min="0.001" max="0.05" step="0.001"></label>
+    </div>
+  </section>
+  {:else if $params.pitch_engine === 'fd_psola'}
+  <section>
+    <h3>FD-PSOLA</h3>
+    <div class="param-group">
+      <label>FFT Size
+        <select bind:value={$params.fd_psola.fft_size}>
+          <option value={1024}>1024</option>
+          <option value={2048}>2048</option>
+          <option value={4096}>4096</option>
+        </select>
+      </label>
+      <label>Window Type
+        <select bind:value={$params.fd_psola.window_type}>
+          <option value="hanning">Hanning</option>
+          <option value="blackman">Blackman</option>
+          <option value="kaiser">Kaiser</option>
+        </select>
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" bind:checked={$params.fd_psola.formant_preservation}> Formant Preservation
+      </label>
+      <label>Formant Method
+        <select bind:value={$params.fd_psola.formant_method}>
+          <option value="cepstral">Cepstral</option>
+          <option value="lpc">LPC</option>
+        </select>
+      </label>
+      <label>Envelope Order<input type="number" bind:value={$params.fd_psola.envelope_order} min="10" max="60"></label>
+      <label>Overlap Factor
+        <select bind:value={$params.fd_psola.overlap_factor}>
+          <option value={2}>2</option>
+          <option value={3}>3</option>
+          <option value={4}>4</option>
+        </select>
+      </label>
+      <label>Phase Handling
+        <select bind:value={$params.fd_psola.phase_mode}>
+          <option value="pitch_sync">Pitch Synchronous</option>
+          <option value="phase_lock">Phase Lock</option>
+        </select>
+      </label>
+      <label>Min Pitch (Hz)<input type="number" bind:value={$params.fd_psola.min_pitch} min="50" max="200"></label>
+      <label>Max Pitch (Hz)<input type="number" bind:value={$params.fd_psola.max_pitch} min="300" max="1000"></label>
     </div>
   </section>
   {:else}

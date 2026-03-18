@@ -107,6 +107,7 @@ export interface Params {
   pitch_engine: PitchEngine;
   sms: SMSParams;
   psola: PSOLAParams;
+  fd_psola: FDPSOLAParams;
 }
 
 export interface RubberbandParams {
@@ -139,7 +140,19 @@ export interface PSOLAParams {
   time_step: number;
 }
 
-export type PitchEngine = 'rubberband' | 'sms' | 'psola';
+export interface FDPSOLAParams {
+  fft_size: number;
+  window_type: string;
+  formant_preservation: boolean;
+  formant_method: string;
+  envelope_order: number;
+  overlap_factor: number;
+  phase_mode: string;
+  min_pitch: number;
+  max_pitch: number;
+}
+
+export type PitchEngine = 'rubberband' | 'sms' | 'psola' | 'fd_psola';
 
 export interface TimeEdit {
   clusterIdx: number;

@@ -115,6 +115,17 @@ def get_default_params():
             'max_pitch': 600,
             'time_step': 0.01,
         },
+        'fd_psola': {
+            'fft_size': 2048,
+            'window_type': 'hanning',
+            'formant_preservation': True,
+            'formant_method': 'cepstral',
+            'envelope_order': 30,
+            'overlap_factor': 4,
+            'phase_mode': 'pitch_sync',
+            'min_pitch': 75,
+            'max_pitch': 600,
+        },
     }
 
 
@@ -448,6 +459,12 @@ def sync_clusters():
                     'times': SESSION['times'],
                     'frequencies': SESSION['frequencies'],
                 }
+        elif SESSION['params'].get('pitch_engine') == 'fd_psola':
+            if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+                SESSION['params']['fd_psola']['_parselmouth_f0'] = {
+                    'times': SESSION['times'],
+                    'frequencies': SESSION['frequencies'],
+                }
 
         success, msg = process_combined(
             SESSION['audio'], SESSION['sr'],
@@ -608,6 +625,12 @@ def correct_cluster():
     elif SESSION['params'].get('pitch_engine') == 'psola':
         if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
             SESSION['params']['psola']['_parselmouth_f0'] = {
+                'times': SESSION['times'],
+                'frequencies': SESSION['frequencies'],
+            }
+    elif SESSION['params'].get('pitch_engine') == 'fd_psola':
+        if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+            SESSION['params']['fd_psola']['_parselmouth_f0'] = {
                 'times': SESSION['times'],
                 'frequencies': SESSION['frequencies'],
             }
@@ -776,6 +799,13 @@ def export_audio():
                         'times': SESSION['times'],
                         'frequencies': SESSION['frequencies'],
                     }
+            elif SESSION['params'].get('pitch_engine') in ('psola', 'fd_psola'):
+                eng = SESSION['params']['pitch_engine']
+                if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+                    SESSION['params'][eng]['_parselmouth_f0'] = {
+                        'times': SESSION['times'],
+                        'frequencies': SESSION['frequencies'],
+                    }
             success, msg = process_combined(
                 SESSION['audio'], SESSION['sr'],
                 SESSION['clusters'], SESSION['params'],
@@ -826,10 +856,17 @@ def delete_cluster():
         cluster['correction_strength'] = 0.0
         cluster['manually_edited'] = False
 
-        # Pass Parselmouth f0 data for SMS engine
+        # Pass Parselmouth f0 data for SMS / PSOLA / FD-PSOLA engines
         if SESSION['params'].get('pitch_engine') == 'sms':
             if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
                 SESSION['params']['sms']['_parselmouth_f0'] = {
+                    'times': SESSION['times'],
+                    'frequencies': SESSION['frequencies'],
+                }
+        elif SESSION['params'].get('pitch_engine') in ('psola', 'fd_psola'):
+            eng = SESSION['params']['pitch_engine']
+            if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+                SESSION['params'][eng]['_parselmouth_f0'] = {
                     'times': SESSION['times'],
                     'frequencies': SESSION['frequencies'],
                 }
@@ -916,6 +953,13 @@ def sync_time_edits():
                 SESSION['params']['_sms_cache_ref'] = [SESSION.get('sms_analysis')]
                 if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
                     SESSION['params']['sms']['_parselmouth_f0'] = {
+                        'times': SESSION['times'],
+                        'frequencies': SESSION['frequencies'],
+                    }
+            elif SESSION['params'].get('pitch_engine') in ('psola', 'fd_psola'):
+                eng = SESSION['params']['pitch_engine']
+                if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+                    SESSION['params'][eng]['_parselmouth_f0'] = {
                         'times': SESSION['times'],
                         'frequencies': SESSION['frequencies'],
                     }
