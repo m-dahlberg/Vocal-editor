@@ -4,7 +4,7 @@ import type { Params } from '$lib/utils/types';
 export const params = writable<Params>({
   min_frequency: 75,
   max_frequency: 600,
-  time_resolution_ms: 20,
+  time_resolution_ms: 5,
   frequency_tolerance_cents: 100,
   min_note_duration_ms: 100,
   max_gap_to_bridge_ms: 500,
@@ -20,7 +20,7 @@ export const params = writable<Params>({
   segment_padding_ms: 300,
   segment_crossfade_ms: 10,
   segment_crop_ms: 50,
-  segment_neighbor_count: 0,
+  segment_neighbor_count: 1,
   segment_auto_process: true,
   max_note_stretch: 200,
   max_note_compress: 50,
@@ -48,6 +48,11 @@ export const params = writable<Params>({
     harm_dev_slope: 0.01,
     min_sine_dur: 0.02,
     residual_level: 1.0,
+  },
+  psola: {
+    min_pitch: 75,
+    max_pitch: 600,
+    time_step: 0.01,
   },
 });
 

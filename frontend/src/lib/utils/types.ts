@@ -106,6 +106,7 @@ export interface Params {
   rb: RubberbandParams;
   pitch_engine: PitchEngine;
   sms: SMSParams;
+  psola: PSOLAParams;
 }
 
 export interface RubberbandParams {
@@ -132,7 +133,13 @@ export interface SMSParams {
   residual_level: number;
 }
 
-export type PitchEngine = 'rubberband' | 'sms';
+export interface PSOLAParams {
+  min_pitch: number;
+  max_pitch: number;
+  time_step: number;
+}
+
+export type PitchEngine = 'rubberband' | 'sms' | 'psola';
 
 export interface TimeEdit {
   clusterIdx: number;

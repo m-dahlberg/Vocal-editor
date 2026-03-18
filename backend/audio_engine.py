@@ -17,7 +17,7 @@ from parselmouth.praat import call
 # DEFAULT PARAMETERS
 # ============================================
 
-DEFAULT_TIME_RESOLUTION_MS = 20
+DEFAULT_TIME_RESOLUTION_MS = 5
 DEFAULT_MIN_FREQUENCY = 75
 DEFAULT_MAX_FREQUENCY = 600
 DEFAULT_FREQUENCY_TOLERANCE_CENTS = 100
@@ -50,7 +50,7 @@ CROSSFADE_MS = 5
 _rubberband_lead_cache = {}  # sr -> lead_samples
 
 # Pitch-map target resolution for smoothed clusters.  The analysis hop
-# (DEFAULT_TIME_RESOLUTION_MS) is typically 20 ms which gives only ~10
+# (DEFAULT_TIME_RESOLUTION_MS) is typically 5 ms which gives ~40
 # points per vibrato cycle at 5 Hz.  Rubberband linearly interpolates
 # between entries, so a coarser grid under-corrects at higher smoothing
 # percentages.  We upsample the per-frame shifts with cubic
@@ -267,6 +267,11 @@ def cluster_notes(times, frequencies, notes, audio, sr, params):
     current = None
     WOBBLE_MS = 150
 
+    # Compute time-based lookahead: how many data points fit in the wobble window.
+    # This keeps wobble detection consistent regardless of time_resolution_ms.
+    time_step_ms = params.get("time_resolution_ms", DEFAULT_TIME_RESOLUTION_MS)
+    wobble_lookahead = max(2, int(WOBBLE_MS / time_step_ms))
+
     for i, (t, f, note) in enumerate(zip(times, frequencies, assigned)):
         if note is None:
             if current:
@@ -290,7 +295,7 @@ def cluster_notes(times, frequencies, notes, audio, sr, params):
             # Check for wobble
             returns = False
             look = 0
-            for j in range(i, min(i + 10, len(assigned))):
+            for j in range(i, min(i + wobble_lookahead, len(assigned))):
                 if assigned[j] == current["primary_note"]:
                     returns = True
                     look = j - i

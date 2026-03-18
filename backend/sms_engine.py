@@ -396,6 +396,108 @@ def _smooth_harmonic_tracks(hfreq, hmag, max_gap=3, fade_frames=3):
     return hfreq, hmag
 
 
+def _find_active_segments(active):
+    """Find contiguous runs of True in a boolean array.
+    Returns list of (start_idx, end_idx) inclusive."""
+    segments = []
+    in_seg = False
+    start = 0
+    for i in range(len(active)):
+        if active[i] and not in_seg:
+            start = i
+            in_seg = True
+        elif not active[i] and in_seg:
+            segments.append((start, i - 1))
+            in_seg = False
+    if in_seg:
+        segments.append((start, len(active) - 1))
+    return segments
+
+
+def additive_synth(hfreq, hmag, hop_size, sr, fade_ms=5.0):
+    """
+    Time-domain additive synthesizer. Drop-in replacement for sineModelSynth.
+
+    Generates sine waves directly with sample-by-sample phase accumulation,
+    avoiding FFT-based overlap-add artifacts (metallic sound, spectral leakage).
+
+    Args:
+        hfreq:    (n_frames, n_harmonics) frequencies in Hz (0 = inactive)
+        hmag:     (n_frames, n_harmonics) magnitudes in dB
+        hop_size: samples between frame centers
+        sr:       sample rate
+        fade_ms:  fade duration for track birth/death (default 5ms)
+
+    Returns:
+        float32 audio array of length n_frames * hop_size
+    """
+    n_frames, n_harmonics = hfreq.shape
+    n_samples = n_frames * hop_size
+    y = np.zeros(n_samples, dtype=np.float64)
+
+    # Convert dB to linear amplitude; zero out inactive harmonics.
+    # Factor of 2 compensates for the DFT convention: analysis with a normalized
+    # window halves the amplitude of real sinusoids (cosine splits into two
+    # complex exponentials). sineModelSynth's IFFT+overlap-add restores this
+    # automatically; direct time-domain synthesis needs the explicit correction.
+    hamp = 2.0 * np.power(10.0, hmag / 20.0)
+    hamp[hfreq <= 0] = 0.0
+
+    fade_samples = max(1, int(fade_ms * sr / 1000.0))
+
+    # Frame center sample indices
+    frame_centers = np.arange(n_frames) * hop_size + hop_size // 2
+    frame_centers = np.minimum(frame_centers, n_samples - 1)
+
+    two_pi = 2.0 * np.pi
+
+    for h in range(n_harmonics):
+        freq_track = hfreq[:, h]
+        amp_track = hamp[:, h]
+
+        # Skip harmonics that are never active
+        if np.all(freq_track <= 0):
+            continue
+
+        active = freq_track > 0
+        segments = _find_active_segments(active)
+
+        for seg_start, seg_end in segments:
+            # Sample range for this segment
+            s0 = seg_start * hop_size
+            s1 = min((seg_end + 1) * hop_size, n_samples)
+            seg_len = s1 - s0
+            if seg_len <= 0:
+                continue
+
+            # Frame centers relative to segment start
+            seg_frames = np.arange(seg_start, seg_end + 1)
+            seg_frame_centers = frame_centers[seg_frames] - s0
+            seg_sample_indices = np.arange(seg_len)
+
+            # Interpolate freq and amp to sample rate
+            freq_seg = np.interp(seg_sample_indices, seg_frame_centers,
+                                 freq_track[seg_start:seg_end + 1])
+            amp_seg = np.interp(seg_sample_indices, seg_frame_centers,
+                                amp_track[seg_start:seg_end + 1])
+
+            # Fade-in at segment start
+            fade_in_len = min(fade_samples, seg_len)
+            amp_seg[:fade_in_len] *= np.linspace(0.0, 1.0, fade_in_len)
+
+            # Fade-out at segment end
+            fade_out_len = min(fade_samples, seg_len)
+            amp_seg[-fade_out_len:] *= np.linspace(1.0, 0.0, fade_out_len)
+
+            # Phase: cumulative integral of instantaneous frequency
+            phase = np.cumsum(two_pi * freq_seg / sr)
+
+            # Accumulate into output
+            y[s0:s1] += amp_seg * np.sin(phase)
+
+    return y.astype(np.float32)
+
+
 def sms_pitch_shift(analysis, pitch_map, sr, audio_length, sms_params=None):
     """
     Apply pitch shifting to SMS analysis data and resynthesize.
@@ -421,11 +523,6 @@ def sms_pitch_shift(analysis, pitch_map, sr, audio_length, sms_params=None):
     n_frames = hfreq.shape[0]
     timbre_preserve = sms_params.get('timbre_preserve', DEFAULT_SMS_TIMBRE_PRESERVE)
     residual_level = sms_params.get('residual_level', DEFAULT_SMS_RESIDUAL_LEVEL)
-    synth_fft_size = sms_params.get('synth_fft_size', DEFAULT_SMS_SYNTH_FFT_SIZE)
-    synth_fft_size = _next_power_of_2(synth_fft_size)
-    # sms-tools sineModelSynth allocates H*(L+3) output samples;
-    # the overlap-add window of size N must fit: N <= 4*H
-    synth_fft_size = max(hop_size * 2, min(synth_fft_size, hop_size * 4))
 
     # Convert pitch map from audio frames (at original sr) to SMS frame indices
     if not pitch_map:
@@ -485,14 +582,11 @@ def sms_pitch_shift(analysis, pitch_map, sr, audio_length, sms_params=None):
     # Fill short harmonic gaps and apply multi-frame fades to reduce clicks
     hfreq, hmag = _smooth_harmonic_tracks(hfreq, hmag, max_gap=3, fade_frames=3)
 
-    # Resynthesize harmonics and stochastic separately for mix control
+    # Resynthesize harmonics using time-domain additive synthesis
     print(f"[SMS] Resynthesizing {n_frames} frames "
-          f"(synth_fft={synth_fft_size}, hop={hop_size}, residual_level={residual_level})...")
+          f"(additive, hop={hop_size}, residual_level={residual_level})...")
 
-    # Pass empty phases so sms-tools uses its internal phase propagation,
-    # which correctly tracks the shifted frequencies instead of using
-    # original analysis phases that cause destructive interference.
-    yh = SM.sineModelSynth(hfreq, hmag, np.array([]), synth_fft_size, hop_size, SMS_INTERNAL_SR)
+    yh = additive_synth(hfreq, hmag, hop_size, SMS_INTERNAL_SR)
 
     # Use the original residual signal directly instead of resynthesizing
     # from the stochastic envelope. The envelope-based resynthesis shapes

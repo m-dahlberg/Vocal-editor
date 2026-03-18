@@ -54,6 +54,7 @@
         <select bind:value={$params.pitch_engine}>
           <option value="rubberband">Rubberband</option>
           <option value="sms">SMS (Spectral Modeling)</option>
+          <option value="psola">PSOLA (Praat)</option>
         </select>
       </label>
     </div>
@@ -83,6 +84,15 @@
       <label class="checkbox-label">
         <input type="checkbox" bind:checked={$params.rb.enable_timemap}> Enable timemap
       </label>
+    </div>
+  </section>
+  {:else if $params.pitch_engine === 'psola'}
+  <section>
+    <h3>PSOLA</h3>
+    <div class="param-group">
+      <label>Min pitch (Hz)<input type="number" bind:value={$params.psola.min_pitch} min="50" max="300"></label>
+      <label>Max pitch (Hz)<input type="number" bind:value={$params.psola.max_pitch} min="200" max="1000"></label>
+      <label>Time step (s)<input type="number" bind:value={$params.psola.time_step} min="0.001" max="0.05" step="0.001"></label>
     </div>
   </section>
   {:else}

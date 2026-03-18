@@ -256,6 +256,15 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
                     )
                     if analysis and "_sms_cache_ref" in params:
                         params["_sms_cache_ref"][0] = analysis
+                elif engine == "psola":
+                    from psola_engine import run_psola_pitch_shift
+                    psola_params = params.get("psola", {})
+                    f0_data = psola_params.pop("_parselmouth_f0", None)
+                    success, msg = run_psola_pitch_shift(
+                        audio_mono, sr, pitch_map, temp_pitched, psola_params,
+                        original_times=f0_data["times"] if f0_data else None,
+                        original_frequencies=f0_data["frequencies"] if f0_data else None,
+                    )
                 else:
                     success, msg = run_rubberband(
                         audio_mono, sr, pitch_map, temp_pitched, rb_params
@@ -286,6 +295,15 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
                 )
                 if analysis and "_sms_cache_ref" in params:
                     params["_sms_cache_ref"][0] = analysis
+            elif engine == "psola":
+                from psola_engine import run_psola_pitch_shift
+                psola_params = params.get("psola", {})
+                f0_data = psola_params.pop("_parselmouth_f0", None)
+                success, msg = run_psola_pitch_shift(
+                    audio_mono, sr, pitch_map, output_path, psola_params,
+                    original_times=f0_data["times"] if f0_data else None,
+                    original_frequencies=f0_data["frequencies"] if f0_data else None,
+                )
             else:
                 success, msg = run_rubberband(
                     audio_mono, sr, pitch_map, output_path, rb_params
