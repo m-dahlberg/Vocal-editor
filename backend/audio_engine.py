@@ -1175,6 +1175,34 @@ def process_segment(audio, sr, clusters, cluster_idx, params, corrected_audio_pa
             os.remove(pitch_output)
             if len(pitched_seg.shape) > 1:
                 pitched_seg = pitched_seg.mean(axis=1)
+        elif engine == "fd_psola":
+            from fd_psola_engine import run_fd_psola_pitch_shift
+            fd_psola_params = params.get("fd_psola", {}).copy()
+            f0_data = fd_psola_params.pop("_parselmouth_f0", None)
+            # Scope F0 data to segment: offset times relative to segment start
+            seg_f0_times = None
+            seg_f0_freqs = None
+            if f0_data is not None:
+                f0_t = np.asarray(f0_data["times"])
+                f0_f = np.asarray(f0_data["frequencies"])
+                mask = (f0_t >= seg_start) & (f0_t <= seg_end)
+                seg_f0_times = f0_t[mask] - seg_start
+                seg_f0_freqs = f0_f[mask]
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                pitch_output = f.name
+            success, msg = run_fd_psola_pitch_shift(
+                segment, sr, pitch_map, pitch_output, fd_psola_params,
+                original_times=seg_f0_times,
+                original_frequencies=seg_f0_freqs,
+            )
+            if not success:
+                if os.path.exists(pitch_output):
+                    os.remove(pitch_output)
+                return None, msg
+            pitched_seg, _ = sf.read(pitch_output)
+            os.remove(pitch_output)
+            if len(pitched_seg.shape) > 1:
+                pitched_seg = pitched_seg.mean(axis=1)
         else:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 pitch_output = f.name

@@ -242,7 +242,23 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
             # Two-pass: pitch first, then time stretch on the result.
             # This avoids the conflict between --pitchmap (realtime mode)
             # and --timemap in a single Rubberband invocation.
+            # Exception: FD-PSOLA handles both in a single pass.
             engine = params.get("pitch_engine", "rubberband")
+
+            if engine == "fd_psola":
+                # Single-pass FD-PSOLA: pitch + time simultaneously
+                from fd_psola_engine import run_fd_psola_time_stretch
+                fd_psola_params = params.get("fd_psola", {})
+                f0_data = fd_psola_params.pop("_parselmouth_f0", None)
+                success, msg = run_fd_psola_time_stretch(
+                    audio_mono, sr, time_map, output_path,
+                    pitch_map=pitch_map,
+                    fd_psola_params=fd_psola_params,
+                    original_times=f0_data["times"] if f0_data else None,
+                    original_frequencies=f0_data["frequencies"] if f0_data else None,
+                )
+                return success, msg
+
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                 temp_pitched = f.name
             try:
@@ -265,15 +281,6 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
                         original_times=f0_data["times"] if f0_data else None,
                         original_frequencies=f0_data["frequencies"] if f0_data else None,
                     )
-                elif engine == "fd_psola":
-                    from fd_psola_engine import run_fd_psola_pitch_shift
-                    fd_psola_params = params.get("fd_psola", {})
-                    f0_data = fd_psola_params.pop("_parselmouth_f0", None)
-                    success, msg = run_fd_psola_pitch_shift(
-                        audio_mono, sr, pitch_map, temp_pitched, fd_psola_params,
-                        original_times=f0_data["times"] if f0_data else None,
-                        original_frequencies=f0_data["frequencies"] if f0_data else None,
-                    )
                 else:
                     success, msg = run_rubberband(
                         audio_mono, sr, pitch_map, temp_pitched, rb_params
@@ -289,9 +296,23 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
                 if os.path.exists(temp_pitched):
                     os.remove(temp_pitched)
         elif has_time:
-            success, msg = run_rubberband_with_timemap(
-                temp_input, output_path, time_map, duration_s, rb_params
-            )
+            engine = params.get("pitch_engine", "rubberband")
+            if engine == "fd_psola":
+                # FD-PSOLA time-only stretching
+                from fd_psola_engine import run_fd_psola_time_stretch
+                fd_psola_params = params.get("fd_psola", {})
+                f0_data = fd_psola_params.pop("_parselmouth_f0", None)
+                success, msg = run_fd_psola_time_stretch(
+                    audio_mono, sr, time_map, output_path,
+                    pitch_map=None,
+                    fd_psola_params=fd_psola_params,
+                    original_times=f0_data["times"] if f0_data else None,
+                    original_frequencies=f0_data["frequencies"] if f0_data else None,
+                )
+            else:
+                success, msg = run_rubberband_with_timemap(
+                    temp_input, output_path, time_map, duration_s, rb_params
+                )
         elif has_pitch:
             engine = params.get("pitch_engine", "rubberband")
             if engine == "sms":
