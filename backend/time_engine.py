@@ -248,7 +248,7 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
             if engine == "fd_psola":
                 # Single-pass FD-PSOLA: pitch + time simultaneously
                 from fd_psola_engine import run_fd_psola_time_stretch
-                fd_psola_params = params.get("fd_psola", {})
+                fd_psola_params = params.get("fd_psola", {}).copy()
                 f0_data = fd_psola_params.pop("_parselmouth_f0", None)
                 success, msg = run_fd_psola_time_stretch(
                     audio_mono, sr, time_map, output_path,
@@ -300,7 +300,7 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
             if engine == "fd_psola":
                 # FD-PSOLA time-only stretching
                 from fd_psola_engine import run_fd_psola_time_stretch
-                fd_psola_params = params.get("fd_psola", {})
+                fd_psola_params = params.get("fd_psola", {}).copy()
                 f0_data = fd_psola_params.pop("_parselmouth_f0", None)
                 success, msg = run_fd_psola_time_stretch(
                     audio_mono, sr, time_map, output_path,
@@ -336,7 +336,7 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
                 )
             elif engine == "fd_psola":
                 from fd_psola_engine import run_fd_psola_pitch_shift
-                fd_psola_params = params.get("fd_psola", {})
+                fd_psola_params = params.get("fd_psola", {}).copy()
                 f0_data = fd_psola_params.pop("_parselmouth_f0", None)
                 success, msg = run_fd_psola_pitch_shift(
                     audio_mono, sr, pitch_map, output_path, fd_psola_params,

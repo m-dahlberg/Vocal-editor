@@ -94,6 +94,9 @@ def _make_window(window_type, length):
     """Create a window array of *length* samples."""
     if window_type == 'kaiser':
         return get_window(('kaiser', 8.0), length, fftbins=False)
+    # scipy uses 'hann' not 'hanning'
+    if window_type == 'hanning':
+        window_type = 'hann'
     return get_window(window_type, length, fftbins=False)
 
 
