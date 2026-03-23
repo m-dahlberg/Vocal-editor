@@ -296,7 +296,13 @@ def run_fd_psola_pitch_shift(audio_mono, sr, pitch_map, output_path,
         n_rfft = fft_size // 2 + 1
         synthesis_window = _make_window(window_type, fft_size)
 
-        out_pos = 0.0  # running output position in samples
+        # ---- Phase vocoder state ----
+        omega_k = 2.0 * np.pi * np.arange(n_rfft) / fft_size
+        prev_analysis_phase = None
+        synthesis_phase = None
+
+        def princarg(x):
+            return (x + np.pi) % (2 * np.pi) - np.pi
 
         for i in range(n_frames):
             mark = marks[i]
@@ -321,72 +327,73 @@ def run_fd_psola_pitch_shift(audio_mono, sr, pitch_map, output_path,
             frame = _extract_frame(audio, mark, half_len, fft_size, analysis_window)
 
             # Build padded analysis window matching _extract_frame layout
-            # so win_sum tracks the true window product (analysis * synthesis)
             aw_padded = np.zeros(fft_size, dtype=np.float64)
             aw_offset = (fft_size - frame_len) // 2
             aw_padded[aw_offset:aw_offset + frame_len] = analysis_window
 
-            if not voiced or abs(shift_semitones) < 0.001:
-                # Unvoiced or no shift: pass through (just OLA)
-                out_mark = int(round(out_pos))
-                if out_mark + fft_size <= len(output):
-                    output[out_mark:out_mark + fft_size] += frame * synthesis_window
-                    win_sum[out_mark:out_mark + fft_size] += aw_padded * synthesis_window
-                if voiced:
-                    out_pos += period / ratio
-                else:
-                    out_pos += period
-                continue
-
             # ---- FFT ----
             spectrum = np.fft.rfft(frame)
-            magnitude = np.abs(spectrum)
+            mag = np.abs(spectrum)
             phase = np.angle(spectrum)
-            log_mag = 20.0 * np.log10(magnitude + 1e-12)
 
-            # ---- Spectral envelope ----
-            if formant_preservation:
-                if formant_method == 'lpc':
-                    envelope = _estimate_envelope_lpc(frame, sr, envelope_order, fft_size)
+            if i == 0 or not voiced:
+                # First frame or unvoiced: reset phase state, pass through
+                synthesis_phase = phase.copy()
+                prev_analysis_phase = phase.copy()
+                y_frame = frame  # direct passthrough, no spectral processing
+
+            elif abs(shift_semitones) < 0.001:
+                # Voiced but no shift: hard reset phase to analysis phase
+                # Prevents drift from previous shifted regions leaking forward
+                synthesis_phase = phase.copy()
+                prev_analysis_phase = phase.copy()
+                y_frame = frame  # direct passthrough, no spectral processing
+
+            else:
+                # ---- Inter-frame phase accumulation (true FD-PSOLA) ----
+                Ha = marks[i] - marks[i - 1]  # analysis hop in samples
+                dphi = princarg(phase - prev_analysis_phase)
+                dev = princarg(dphi - omega_k * Ha)
+                delta_phi = ratio * (omega_k * Ha + dev)
+                synthesis_phase = princarg(synthesis_phase + delta_phi)
+
+                # ---- Spectral envelope & fine structure ----
+                log_mag = 20.0 * np.log10(mag + 1e-12)
+
+                if formant_preservation:
+                    if formant_method == 'lpc':
+                        envelope = _estimate_envelope_lpc(frame, sr, envelope_order, fft_size)
+                    else:
+                        envelope = _estimate_envelope_cepstral(log_mag, envelope_order)
+                    fine_structure = log_mag - envelope
                 else:
-                    envelope = _estimate_envelope_cepstral(log_mag, envelope_order)
+                    fine_structure = log_mag
+                    envelope = None
 
-                # Fine structure = full spectrum minus envelope
-                fine_structure = log_mag - envelope
-            else:
-                fine_structure = log_mag
-                envelope = None
+                shifted_fine = _shift_fine_structure(fine_structure, ratio)
 
-            # ---- Shift fine structure ----
-            shifted_fine = _shift_fine_structure(fine_structure, ratio)
+                if formant_preservation and envelope is not None:
+                    new_log_mag = envelope + shifted_fine
+                else:
+                    new_log_mag = shifted_fine
 
-            # ---- Reconstruct magnitude ----
-            if formant_preservation and envelope is not None:
-                new_log_mag = envelope + shifted_fine
-            else:
-                new_log_mag = shifted_fine
+                new_mag = 10.0 ** (new_log_mag / 20.0)
 
-            new_mag = 10.0 ** (new_log_mag / 20.0)
+                if phase_mode == 'phase_lock':
+                    new_phase = _phase_lock(synthesis_phase.copy(), new_mag)
+                else:
+                    new_phase = synthesis_phase.copy()
 
-            # ---- Phase handling ----
-            if phase_mode == 'phase_lock':
-                new_phase = _phase_lock(phase * ratio, new_mag)
-            else:
-                # pitch_sync: scale phase by ratio
-                new_phase = phase * ratio
+                y_frame = np.fft.irfft(new_mag * np.exp(1j * new_phase), n=fft_size)
 
-            # ---- IFFT ----
-            new_spectrum = new_mag * np.exp(1j * new_phase)
-            new_frame = np.fft.irfft(new_spectrum, n=fft_size)
+                prev_analysis_phase = phase.copy()
 
-            # ---- Place at output position ----
-            out_mark = int(round(out_pos))
-            if out_mark + fft_size <= len(output):
-                output[out_mark:out_mark + fft_size] += new_frame * synthesis_window
-                win_sum[out_mark:out_mark + fft_size] += aw_padded * synthesis_window
-
-            # Advance output by target period
-            out_pos += period / ratio
+            # ---- OLA at original pitch mark (duration preserved) ----
+            start = mark - fft_size // 2
+            end = start + fft_size
+            if 0 <= start < len(output) and end <= len(output):
+                output[start:end] += y_frame * synthesis_window
+                win_sum[start:end] += aw_padded * synthesis_window
 
         # ---- 4. Normalise by overlap-add window sum ----
         nonzero = win_sum > 1e-8
@@ -394,14 +401,6 @@ def run_fd_psola_pitch_shift(audio_mono, sr, pitch_map, output_path,
 
         # Trim to original length
         y_out = output[:audio_length]
-
-        # Fade edges to avoid clicks
-        fade_len = min(256, audio_length // 4)
-        if fade_len > 0:
-            fade_in = np.linspace(0.0, 1.0, fade_len)
-            fade_out = np.linspace(1.0, 0.0, fade_len)
-            y_out[:fade_len] *= fade_in
-            y_out[-fade_len:] *= fade_out
 
         sf.write(str(output_path), y_out.astype(np.float32), int(sr))
         print(f"[FD-PSOLA] Processed {n_frames} frames, output {audio_length} samples")
