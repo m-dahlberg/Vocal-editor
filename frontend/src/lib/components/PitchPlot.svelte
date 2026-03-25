@@ -1042,9 +1042,10 @@
   });
 
   $effect(() => {
-    // Re-render when clusters or midi change, without resetting zoom
+    // Re-render when clusters or midi/warnings change, without resetting zoom
     const cls = $clusters;
     void $midiNotes;
+    void $midiWarnings;
     untrack(() => {
       // Clear correction curve overlay when clusters are empty (new file loaded)
       if (cls.length === 0) {

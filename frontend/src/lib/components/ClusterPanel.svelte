@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { selectedCluster, selectedIdx, selectedIndices, clusters, dirtyClusters } from '$lib/stores/appState';
+  import { selectedCluster, selectedIdx, selectedIndices, clusters, dirtyClusters, midiWarnings, midiLoaded } from '$lib/stores/appState';
   import { params } from '$lib/stores/params';
   import type { Cluster } from '$lib/utils/types';
 
@@ -7,9 +7,16 @@
     onClusterParamChange: () => void;
     onProcessSegment: () => void;
     onEditComplete: () => void;
+    onSeekTime: (time: number) => void;
   }
 
-  let { onClusterParamChange, onProcessSegment, onEditComplete }: Props = $props();
+  let { onClusterParamChange, onProcessSegment, onEditComplete, onSeekTime }: Props = $props();
+
+  function formatTimecode(seconds: number): string {
+    const m = Math.floor(seconds / 60);
+    const s = seconds - m * 60;
+    return `${m}:${s < 10 ? '0' : ''}${s.toFixed(2)}`;
+  }
 
   let processingSegment = $state(false);
 
@@ -185,7 +192,40 @@
         {processingSegment ? 'Processing...' : 'Process Segment'}
       </button>
     {:else}
-      <p class="placeholder">Click a note box to select it</p>
+      {#if $midiWarnings.length > 0}
+        <div style="font-size:0.75rem; color:var(--accent2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;">
+          MIDI Errors ({$midiWarnings.length})
+        </div>
+        <div class="error-list">
+          {#each $midiWarnings as warning, i}
+            <div class="error-item-row">
+              <button
+                class="error-item"
+                onclick={() => onSeekTime(warning.start_time)}
+              >
+                <span class="error-time">{formatTimecode(warning.start_time)}</span>
+                <span class="error-badge {warning.type}">{warning.type === 'mismatch' ? 'WRONG' : 'MISSING'}</span>
+                <span class="error-desc">
+                  {#if warning.type === 'mismatch'}
+                    Expected {warning.midi_note}, got {warning.cluster_note} ({Math.round(warning.cents_off ?? 0)}c off)
+                  {:else}
+                    Missing note {warning.midi_note}
+                  {/if}
+                </span>
+              </button>
+              <button
+                class="error-dismiss"
+                onclick={() => { $midiWarnings = $midiWarnings.filter((_, j) => j !== i); }}
+                title="Dismiss"
+              >&times;</button>
+            </div>
+          {/each}
+        </div>
+      {:else if $midiLoaded}
+        <p class="placeholder">No MIDI errors found</p>
+      {:else}
+        <p class="placeholder">Click a note box to select it</p>
+      {/if}
     {/if}
   </div>
 </aside>
@@ -209,5 +249,95 @@
   .process-segment-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  .error-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+
+  .error-item-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+  }
+
+  .error-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 4px 0 0 4px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--text);
+    font-size: 0.78rem;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .error-item:hover {
+    border-color: var(--accent2);
+    background: rgba(15, 155, 142, 0.1);
+  }
+
+  .error-dismiss {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    flex-shrink: 0;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-left: none;
+    border-radius: 0 4px 4px 0;
+    color: var(--text-dim);
+    font-size: 0.9rem;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .error-dismiss:hover {
+    background: rgba(233, 69, 96, 0.2);
+    color: #e94560;
+  }
+
+  .error-time {
+    font-family: monospace;
+    font-size: 0.75rem;
+    color: var(--accent2);
+    flex-shrink: 0;
+  }
+
+  .error-badge {
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+  }
+
+  .error-badge.mismatch {
+    background: rgba(233, 69, 96, 0.25);
+    color: #e94560;
+  }
+
+  .error-badge.missing {
+    background: rgba(255, 165, 0, 0.25);
+    color: #ffa500;
+  }
+
+  .error-desc {
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    width: 100%;
   }
 </style>

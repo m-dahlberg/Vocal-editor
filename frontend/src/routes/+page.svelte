@@ -784,7 +784,7 @@
 
   <div class="right-panel">
     {#if $activeTab === 'pitch'}
-      <ClusterPanel {onClusterParamChange} onProcessSegment={processSegment} onEditComplete={autoProcessSegment} />
+      <ClusterPanel {onClusterParamChange} onProcessSegment={processSegment} onEditComplete={autoProcessSegment} onSeekTime={(t) => waveformPlayer?.seek(t)} />
     {:else}
       <TimeClusterPanel onProcessSegment={processSegment} />
     {/if}
