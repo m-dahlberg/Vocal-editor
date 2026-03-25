@@ -24,6 +24,17 @@ export interface MidiNote {
   end_time: number;
 }
 
+export interface MidiWarning {
+  type: 'mismatch' | 'missing';
+  cluster_idx?: number;
+  cluster_note?: string;
+  midi_note: string;
+  midi_freq: number;
+  start_time: number;
+  end_time: number;
+  cents_off?: number;
+}
+
 export interface AnalysisResult {
   ok: boolean;
   error?: string;
@@ -42,6 +53,7 @@ export interface CorrectResult {
   ok: boolean;
   error?: string;
   clusters: Cluster[];
+  warnings?: MidiWarning[];
 }
 
 export interface SyncResult {

@@ -482,7 +482,9 @@ def autocorrect_midi(clusters, midi_notes, params):
     smoothing_threshold = params.get("smoothing_threshold_cents", DEFAULT_SMOOTHING_THRESHOLD_CENTS)
     smoothing_threshold_ms = params.get("smoothing_threshold_ms", DEFAULT_SMOOTHING_THRESHOLD_MS)
 
-    for cluster in clusters:
+    warnings = []
+
+    for idx, cluster in enumerate(clusters):
         if cluster.get("manually_edited"):
             continue
 
@@ -515,6 +517,19 @@ def autocorrect_midi(clusters, midi_notes, params):
                 else cluster_note
             )
 
+        # Warn if cluster was not corrected to its overlapping MIDI note
+        if best_midi is not None and max_overlap > 0 and target_note != best_midi["note_name"]:
+            warnings.append({
+                "type": "mismatch",
+                "cluster_idx": idx,
+                "cluster_note": cluster_note,
+                "midi_note": best_midi["note_name"],
+                "midi_freq": best_midi["frequency"],
+                "start_time": cluster["start_time"],
+                "end_time": cluster["end_time"],
+                "cents_off": abs(hz_to_cents(cluster_freq, best_midi["frequency"])),
+            })
+
         ideal_freq = note_to_hz(target_note)
         if ideal_freq is None:
             continue
@@ -533,7 +548,23 @@ def autocorrect_midi(clusters, midi_notes, params):
                 and duration_ms >= smoothing_threshold_ms):
             cluster["smoothing_percent"] = autocorrect_smoothing
 
-    return clusters
+    # Warn about MIDI notes with no overlapping cluster
+    for midi_note in midi_notes:
+        has_overlap = any(
+            min(c["end_time"], midi_note["end_time"])
+            > max(c["start_time"], midi_note["start_time"])
+            for c in clusters
+        )
+        if not has_overlap:
+            warnings.append({
+                "type": "missing",
+                "midi_note": midi_note["note_name"],
+                "midi_freq": midi_note["frequency"],
+                "start_time": midi_note["start_time"],
+                "end_time": midi_note["end_time"],
+            })
+
+    return clusters, warnings
 
 
 def autocorrect_standard(clusters, params):

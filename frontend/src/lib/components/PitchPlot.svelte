@@ -1,14 +1,14 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import {
-    clusters, times, frequencies, midiNotes,
+    clusters, times, frequencies, midiNotes, midiWarnings,
     selectedIdx, selectedIndices, showMidi, showCorrectionCurve,
     activeTab, viewXRange, waveformReset
   } from '$lib/stores/appState';
   import { NOTE_FREQ_MAP, getYRange, clusterDisplayFreq, boxHeight } from '$lib/utils/pitchMath';
   import { play as sinePlay, updateFrequency as sineUpdate, stop as sineStop } from '$lib/utils/sinePlayer';
   import ProcessingOverlay from './ProcessingOverlay.svelte';
-  import type { Cluster, MidiNote } from '$lib/utils/types';
+  import type { Cluster, MidiNote, MidiWarning } from '$lib/utils/types';
 
   interface Props {
     onClusterSelect: (idx: number, cluster: Cluster) => void;
@@ -17,6 +17,7 @@
     onDrawBox: (start: number, end: number) => void;
     onClusterSmoothing: (idx: number, smoothing: number) => void;
     onClusterRampDrag: (idx: number, rampIn: number, rampOut: number) => void;
+    onWarningFix?: (warning: MidiWarning) => void;
     onResetView: () => void;
     syncWaveform: (xRange: [number, number], totalDuration: number) => void;
     onSeek?: (time: number) => void;
@@ -25,7 +26,7 @@
   let {
     onClusterSelect, onClusterDrag, onClusterResize,
     onDrawBox, onClusterSmoothing, onClusterRampDrag,
-    onResetView, syncWaveform, onSeek
+    onWarningFix, onResetView, syncWaveform, onSeek
   }: Props = $props();
 
   let plotEl: HTMLDivElement;
@@ -62,6 +63,10 @@
     noteSelEdge: '#e94560',
     midi: '#06D6A0',
     playhead: '#e94560',
+    warnMismatchFill: 'rgba(255,60,60,0.12)',
+    warnMismatchEdge: 'rgba(255,60,60,0.7)',
+    warnMissingFill: 'rgba(255,60,60,0.15)',
+    warnMissingEdge: 'rgba(255,60,60,0.5)',
   };
 
   function buildLayout(xRange: [number, number], yRange: [number, number]) {
@@ -116,7 +121,8 @@
 
   function buildTraces(
     t: number[], f: (number | null)[], cls: Cluster[], midi: MidiNote[],
-    selIndices: Set<number>, showMidiFlag: boolean, showCorrFlag: boolean
+    selIndices: Set<number>, showMidiFlag: boolean, showCorrFlag: boolean,
+    warns: MidiWarning[] = []
   ) {
     const traces: any[] = [];
 
@@ -188,7 +194,58 @@
       });
     }
 
-    // Playhead
+    // Warning markers (before playhead so playhead stays last for SVG lookup)
+    for (const w of warns) {
+      if (w.type === 'mismatch') {
+        // Fill trace
+        traces.push({
+          x: [w.start_time, w.end_time, w.end_time, w.start_time, w.start_time],
+          y: [w.midi_freq - h/2, w.midi_freq - h/2, w.midi_freq + h/2, w.midi_freq + h/2, w.midi_freq - h/2],
+          type: 'scatter', mode: 'lines',
+          fill: 'toself',
+          fillcolor: COLORS.warnMismatchFill,
+          line: { color: 'rgba(0,0,0,0)', width: 0 },
+          name: '', showlegend: false,
+          hoverinfo: 'text',
+          text: Array(5).fill(`Mismatch: expected ${w.midi_note}, got ${w.cluster_note} (${Math.round(w.cents_off ?? 0)}c off)`),
+        });
+        // Dashed outline trace
+        traces.push({
+          x: [w.start_time, w.end_time, w.end_time, w.start_time, w.start_time],
+          y: [w.midi_freq - h/2, w.midi_freq - h/2, w.midi_freq + h/2, w.midi_freq + h/2, w.midi_freq - h/2],
+          type: 'scatter', mode: 'lines',
+          line: { color: COLORS.warnMismatchEdge, width: 2, dash: 'dash' },
+          name: '', showlegend: false,
+          hoverinfo: 'text',
+          text: Array(5).fill(`Mismatch: expected ${w.midi_note}, got ${w.cluster_note} (${Math.round(w.cents_off ?? 0)}c off)`),
+        });
+      } else if (w.type === 'missing') {
+        // Fill trace (no visible border — Plotly drops dash on filled traces)
+        traces.push({
+          x: [w.start_time, w.end_time, w.end_time, w.start_time, w.start_time],
+          y: [w.midi_freq - h/2, w.midi_freq - h/2, w.midi_freq + h/2, w.midi_freq + h/2, w.midi_freq - h/2],
+          type: 'scatter', mode: 'lines',
+          fill: 'toself',
+          fillcolor: COLORS.warnMissingFill,
+          line: { color: 'rgba(0,0,0,0)', width: 0 },
+          name: '', showlegend: false,
+          hoverinfo: 'text',
+          text: Array(5).fill(`No vocal detected for MIDI ${w.midi_note}`),
+        });
+        // Dotted outline trace (separate so dash style is preserved)
+        traces.push({
+          x: [w.start_time, w.end_time, w.end_time, w.start_time, w.start_time],
+          y: [w.midi_freq - h/2, w.midi_freq - h/2, w.midi_freq + h/2, w.midi_freq + h/2, w.midi_freq - h/2],
+          type: 'scatter', mode: 'lines',
+          line: { color: COLORS.warnMissingEdge, width: 1.5, dash: 'dot' },
+          name: '', showlegend: false,
+          hoverinfo: 'text',
+          text: Array(5).fill(`No vocal detected for MIDI ${w.midi_note}`),
+        });
+      }
+    }
+
+    // Playhead (must be last trace for _findPlayheadSvg)
     traces.push({
       x: [_playheadTime, _playheadTime], y: _yRange,
       type: 'scatter', mode: 'lines',
@@ -248,6 +305,22 @@
            py > layout.margin.t && py < rect.height - layout.margin.b;
   }
 
+  function _getWarningAtMouse(e: MouseEvent): MidiWarning | null {
+    const rect = plotEl.getBoundingClientRect();
+    const layout = (plotEl as any)._fullLayout;
+    if (!layout) return null;
+    const x = layout.xaxis.p2d(e.clientX - rect.left - layout.margin.l);
+    const y = layout.yaxis.p2d(e.clientY - rect.top - layout.margin.t);
+    const h = boxHeight(_fullYRange);
+    for (const w of $midiWarnings) {
+      if (x >= w.start_time && x <= w.end_time &&
+          y >= w.midi_freq - h/2 && y <= w.midi_freq + h/2) {
+        return w;
+      }
+    }
+    return null;
+  }
+
   function _boxTraceIndex(clusterIdx: number): number {
     const hasMidi = $midiNotes.length > 0 ? 1 : 0;
     return 2 + hasMidi + clusterIdx * 2;
@@ -266,7 +339,7 @@
   function _redrawImmediate() {
     if (!Plotly || !plotEl) return;
     Plotly.react(plotEl,
-      buildTraces($times, $frequencies, $clusters, $midiNotes, $selectedIndices, $showMidi, $showCorrectionCurve),
+      buildTraces($times, $frequencies, $clusters, $midiNotes, $selectedIndices, $showMidi, $showCorrectionCurve, $midiWarnings),
       buildLayout(_xRange, _yRange),
       { responsive: true, displayModeBar: false }
     );
@@ -369,6 +442,17 @@
           hasMoved = false;
           plotEl.style.cursor = 'grabbing';
           e.preventDefault();
+          return;
+        }
+      }
+
+      // Ctrl+click on warning box → fix it
+      if (e.ctrlKey && !e.shiftKey) {
+        const warning = _getWarningAtMouse(e);
+        if (warning && onWarningFix) {
+          e.preventDefault();
+          e.stopPropagation();
+          onWarningFix(warning);
           return;
         }
       }
@@ -904,6 +988,7 @@
       const dragLayer = plotEl.querySelector('.nsewdrag') as HTMLElement;
       if (dragLayer) dragLayer.style.cursor = newCursor;
     });
+
   }
 
   onMount(async () => {

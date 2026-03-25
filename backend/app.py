@@ -343,8 +343,9 @@ def correct():
             SESSION['params'][k] = v
 
     try:
+        warnings = []
         if SESSION['midi_notes']:
-            SESSION['clusters'] = autocorrect_midi(
+            SESSION['clusters'], warnings = autocorrect_midi(
                 SESSION['clusters'], SESSION['midi_notes'], SESSION['params']
             )
         else:
@@ -353,6 +354,7 @@ def correct():
         return jsonify({
             'ok': True,
             'clusters': clusters_to_json(SESSION['clusters']),
+            'warnings': warnings,
         })
 
     except Exception as e:

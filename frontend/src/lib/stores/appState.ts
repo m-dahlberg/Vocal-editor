@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import type { Cluster, MidiNote, LogMessage, TimeEdit, TimemapEntry } from '$lib/utils/types';
+import type { Cluster, MidiNote, MidiWarning, LogMessage, TimeEdit, TimemapEntry } from '$lib/utils/types';
 
 // Audio/analysis state
 export const clusters = writable<Cluster[]>([]);
@@ -8,6 +8,7 @@ export const frequencies = writable<(number | null)[]>([]);
 export const originalTimes = writable<number[]>([]);
 export const originalFrequencies = writable<(number | null)[]>([]);
 export const midiNotes = writable<MidiNote[]>([]);
+export const midiWarnings = writable<MidiWarning[]>([]);
 
 // Reference audio
 export const referenceClusters = writable<Cluster[]>([]);

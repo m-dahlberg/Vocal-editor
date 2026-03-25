@@ -14,14 +14,14 @@
   import * as api from '$lib/api';
   import {
     clusters, times, frequencies, originalTimes, originalFrequencies,
-    midiNotes, selectedIdx, selectedIndices, dirtyClusters,
+    midiNotes, midiWarnings, selectedIdx, selectedIndices, dirtyClusters,
     audioLoaded, audioUrl, processing, log,
     activeTab, timeEdits, dirtyTimeEdits, backendTimemap
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
   import { get } from 'svelte/store';
-  import type { Cluster } from '$lib/utils/types';
+  import type { Cluster, MidiWarning } from '$lib/utils/types';
 
   let pitchPlot: PitchPlot;
   let timeAlignmentView: TimeAlignmentView;
@@ -135,6 +135,90 @@
     refreshCorrectionCurve();
     log(`${indices.length} cluster(s) ramp: in=${rampIn.toFixed(0)}ms, out=${rampOut.toFixed(0)}ms`);
     autoProcessSegment();
+  }
+
+  async function onWarningFix(warning: MidiWarning) {
+    const cls = get(clusters);
+    const p = getAllParams();
+    let targetIdx: number;
+
+    if (warning.type === 'mismatch' && warning.cluster_idx != null) {
+      // Fix existing cluster: correct it to the MIDI reference pitch
+      const c = cls[warning.cluster_idx];
+      if (!c) return;
+      const centsOff = 1200 * Math.log2(c.mean_freq / warning.midi_freq);
+      c.pitch_shift_semitones = -centsOff / 100.0;
+      c.correction_strength = 100;
+      c.manually_edited = true;
+      targetIdx = warning.cluster_idx;
+      $clusters = cls;
+      $dirtyClusters = new Set([...$dirtyClusters, targetIdx]);
+      log(`Fixed cluster ${targetIdx + 1}: corrected to ${warning.midi_note}`);
+    } else if (warning.type === 'missing') {
+      // Create a new cluster at the MIDI position
+      const t = get(times);
+      const f = get(frequencies);
+      const points: { time: number; freq: number }[] = [];
+      for (let i = 0; i < t.length; i++) {
+        const freq = f[i];
+        if (t[i] >= warning.start_time && t[i] <= warning.end_time && freq && !isNaN(freq)) {
+          points.push({ time: t[i], freq });
+        }
+      }
+
+      if (points.length === 0) {
+        log(`No audio to correct at ${warning.start_time.toFixed(2)}s–${warning.end_time.toFixed(2)}s`, 'warn');
+        return;
+      }
+
+      // Check overlaps with existing clusters
+      for (const c of cls) {
+        if (!(warning.end_time <= c.start_time || warning.start_time >= c.end_time)) {
+          log('Cannot create cluster: overlaps with existing cluster', 'warn');
+          return;
+        }
+      }
+
+      const meanFreq = points.reduce((sum, pt) => sum + pt.freq, 0) / points.length;
+      const centsOff = 1200 * Math.log2(meanFreq / warning.midi_freq);
+
+      const newCluster: Cluster = {
+        note: warning.midi_note,
+        start_time: warning.start_time,
+        end_time: warning.end_time,
+        mean_freq: meanFreq,
+        duration_ms: (warning.end_time - warning.start_time) * 1000,
+        pitch_shift_semitones: -centsOff / 100.0,
+        ramp_in_ms: p.transition_ramp_ms,
+        ramp_out_ms: p.transition_ramp_ms,
+        correction_strength: 100,
+        smoothing_percent: 0,
+        manually_edited: true,
+        times: points.map(pt => pt.time),
+        frequencies: points.map(pt => pt.freq),
+      };
+
+      let insertIdx = cls.findIndex(c => c.start_time > warning.start_time);
+      if (insertIdx === -1) insertIdx = cls.length;
+      cls.splice(insertIdx, 0, newCluster);
+      targetIdx = insertIdx;
+      $clusters = cls;
+      $dirtyClusters = new Set([...$dirtyClusters, targetIdx]);
+      log(`Created cluster for MIDI ${warning.midi_note} at ${warning.start_time.toFixed(2)}s`);
+    } else {
+      return;
+    }
+
+    // Remove the resolved warning
+    $midiWarnings = $midiWarnings.filter(w => w !== warning);
+
+    // Update visuals
+    updatePitchCurveForCluster(targetIdx);
+    refreshCorrectionCurve();
+
+    // Process the segment immediately
+    $selectedIdx = targetIdx;
+    await processSegment();
   }
 
   function onDrawBox(startTime: number, endTime: number) {
@@ -281,6 +365,7 @@
       }
 
       $clusters = result.clusters;
+      $midiWarnings = [];
       $times = result.times;
       $frequencies = result.frequencies;
       $originalTimes = [...result.times];
@@ -349,6 +434,7 @@
       }
 
       $clusters = result.clusters;
+      $midiWarnings = result.warnings ?? [];
 
       updateAllPitchCurves();
       refreshCorrectionCurve();
@@ -671,6 +757,7 @@
         {onDrawBox}
         {onClusterSmoothing}
         {onClusterRampDrag}
+        {onWarningFix}
         onResetView={() => pitchPlot?.resetView()}
         {syncWaveform}
         {onSeek}
