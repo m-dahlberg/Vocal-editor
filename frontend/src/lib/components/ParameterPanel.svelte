@@ -93,6 +93,19 @@
       <label>Min pitch (Hz)<input type="number" bind:value={$params.psola.min_pitch} min="50" max="300"></label>
       <label>Max pitch (Hz)<input type="number" bind:value={$params.psola.max_pitch} min="200" max="1000"></label>
       <label>Time step (s)<input type="number" bind:value={$params.psola.time_step} min="0.001" max="0.05" step="0.001"></label>
+      <label>Resynthesis
+        <select bind:value={$params.psola.resynthesis_method}>
+          <option value="overlap_add">Overlap-Add (TD-PSOLA)</option>
+          <option value="lpc">LPC (formant preserving)</option>
+        </select>
+      </label>
+      <label>Pitch point step<input type="number" bind:value={$params.psola.pitch_point_step} min="1" max="10"></label>
+      <label>Pitch smooth (ms)<input type="number" bind:value={$params.psola.pitch_smooth_window_ms} min="0" max="100" step="5"></label>
+      <label>Max shift (semitones)<input type="number" bind:value={$params.psola.max_shift_semitones} min="6" max="24"></label>
+      <label>Voicing threshold
+        <input type="range" bind:value={$params.voicing_threshold} min="0" max="1" step="0.05">
+        <span>{$params.voicing_threshold}</span>
+      </label>
     </div>
   </section>
   {:else if $params.pitch_engine === 'fd_psola'}
@@ -101,9 +114,11 @@
     <div class="param-group">
       <label>FFT Size
         <select bind:value={$params.fd_psola.fft_size}>
+          <option value={512}>512</option>
           <option value={1024}>1024</option>
           <option value={2048}>2048</option>
           <option value={4096}>4096</option>
+          <option value={8192}>8192</option>
         </select>
       </label>
       <label>Window Type
@@ -113,6 +128,12 @@
           <option value="kaiser">Kaiser</option>
         </select>
       </label>
+      {#if $params.fd_psola.window_type === 'kaiser'}
+        <label>Kaiser Beta
+          <input type="range" bind:value={$params.fd_psola.kaiser_beta} min="2" max="20" step="0.5">
+          <span>{$params.fd_psola.kaiser_beta}</span>
+        </label>
+      {/if}
       <label class="checkbox-label">
         <input type="checkbox" bind:checked={$params.fd_psola.formant_preservation}> Formant Preservation
       </label>
@@ -128,6 +149,8 @@
           <option value={2}>2</option>
           <option value={3}>3</option>
           <option value={4}>4</option>
+          <option value={6}>6</option>
+          <option value={8}>8</option>
         </select>
       </label>
       <label>Phase Handling

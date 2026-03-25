@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { uploadAudio, uploadMidi, uploadReference, uploadBacking, audioUrl as getAudioUrl } from '$lib/api';
+  import { uploadAudio, uploadMidi, uploadPianoGuide, exportMidiUrl, uploadReference, uploadBacking, audioUrl as getAudioUrl } from '$lib/api';
   import * as api from '$lib/api';
   import {
     audioLoaded, midiLoaded, fileStatus, showHelp, showMidi, showCorrectionCurve,
@@ -12,6 +12,7 @@
 
   let audioFileInput: HTMLInputElement;
   let midiFileInput: HTMLInputElement;
+  let pianoGuideFileInput: HTMLInputElement;
   let referenceFileInput: HTMLInputElement;
   let backingFileInput: HTMLInputElement;
 
@@ -123,8 +124,35 @@
         return;
       }
       $midiLoaded = true;
+      $midiNotes = result.midi_notes;
       $fileStatus = $fileStatus + ` | ${file.name} (${result.note_count} notes)`;
       log(`MIDI loaded: ${result.message}`);
+      if ($audioLoaded) await runAnalyze();
+    } catch (e: any) {
+      log(`Error: ${e}`, 'error');
+    } finally {
+      $processing = false;
+    }
+  }
+
+  async function handlePianoGuideUpload(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    $processing = true;
+    log(`Analyzing piano guide ${file.name}...`);
+
+    try {
+      const result = await uploadPianoGuide(file);
+      if (result.error) {
+        log(`Error: ${result.error}`, 'error');
+        return;
+      }
+      $midiLoaded = true;
+      $midiNotes = result.midi_notes;
+      $fileStatus = $fileStatus + ` | Piano: ${file.name} (${result.note_count} notes)`;
+      log(`Piano guide loaded: ${result.message}`);
       if ($audioLoaded) await runAnalyze();
     } catch (e: any) {
       log(`Error: ${e}`, 'error');
@@ -188,6 +216,13 @@
       MIDI
       <input type="file" bind:this={midiFileInput} accept=".mid,.midi" hidden onchange={handleMidiUpload}>
     </label>
+    <label class="btn btn-secondary">
+      Piano
+      <input type="file" bind:this={pianoGuideFileInput} accept=".wav,.mp3,.flac,.aif,.aiff" hidden onchange={handlePianoGuideUpload}>
+    </label>
+    {#if $midiLoaded}
+      <a class="btn btn-secondary" href={exportMidiUrl()} download="piano_guide.mid">Export MIDI</a>
+    {/if}
     <span class="file-status">{$fileStatus}</span>
   </div>
   <div class="overlay-toggles">

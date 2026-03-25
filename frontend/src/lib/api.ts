@@ -31,6 +31,17 @@ export async function uploadMidi(file: File): Promise<UploadResult> {
   return r.json();
 }
 
+export async function uploadPianoGuide(file: File): Promise<UploadResult> {
+  const fd = new FormData();
+  fd.append('file', file);
+  const r = await fetch('/api/upload_piano_guide', { method: 'POST', body: fd });
+  return r.json();
+}
+
+export function exportMidiUrl(): string {
+  return '/api/export_midi';
+}
+
 export async function analyze(params: Params): Promise<AnalysisResult> {
   return post('/api/analyze', params);
 }

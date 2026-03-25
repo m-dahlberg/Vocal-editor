@@ -27,7 +27,7 @@ def save_as_wav(uploaded_file, wav_path):
 
 
 from audio_engine import (
-    analyze_pitch, cluster_notes, parse_midi_file,
+    analyze_pitch, cluster_notes, parse_midi_file, piano_to_midi_notes, midi_notes_to_file,
     autocorrect_midi, autocorrect_standard,
     process_full_audio, process_segment,
     clusters_to_json, get_audio_mono, hz_to_note,
@@ -97,7 +97,7 @@ def get_default_params():
             'window_long': DEFAULT_RUBBERBAND_WINDOW_LONG,
             'smoothing': DEFAULT_RUBBERBAND_SMOOTHING,
         },
-        'pitch_engine': 'fd_psola',
+        'pitch_engine': 'psola',
         'sms': {
             'max_harmonics': 40,
             'peak_threshold': -80,
@@ -114,7 +114,12 @@ def get_default_params():
             'min_pitch': 75,
             'max_pitch': 600,
             'time_step': 0.01,
+            'resynthesis_method': 'overlap_add',
+            'pitch_point_step': 1,
+            'pitch_smooth_window_ms': 0,
+            'max_shift_semitones': 12,
         },
+        'voicing_threshold': 0.75,
         'fd_psola': {
             'fft_size': 2048,
             'window_type': 'kaiser',
@@ -125,6 +130,7 @@ def get_default_params():
             'phase_mode': 'pitch_sync',
             'min_pitch': 75,
             'max_pitch': 600,
+            'kaiser_beta': 8.0,
         },
     }
 
@@ -227,7 +233,36 @@ def upload_midi():
     midi_notes, msg = parse_midi_file(str(path))
     SESSION['midi_notes'] = midi_notes
 
-    return jsonify({'ok': True, 'message': msg, 'note_count': len(midi_notes)})
+    return jsonify({'ok': True, 'message': msg, 'note_count': len(midi_notes), 'midi_notes': midi_notes})
+
+
+@app.route('/api/upload_piano_guide', methods=['POST'])
+def upload_piano_guide():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+
+    file = request.files['file']
+    path = UPLOAD_DIR / f"piano_{uuid.uuid4().hex}.wav"
+    file.save(str(path))
+
+    try:
+        midi_notes, msg = piano_to_midi_notes(str(path), SESSION['params'])
+    except Exception as e:
+        return jsonify({'error': f'Piano analysis failed: {str(e)}'}), 500
+
+    SESSION['midi_notes'] = midi_notes
+
+    return jsonify({'ok': True, 'message': msg, 'note_count': len(midi_notes), 'midi_notes': midi_notes})
+
+
+@app.route('/api/export_midi', methods=['GET'])
+def export_midi():
+    if not SESSION.get('midi_notes'):
+        return jsonify({'error': 'No MIDI notes available'}), 400
+
+    path = UPLOAD_DIR / f"export_{uuid.uuid4().hex}.mid"
+    midi_notes_to_file(SESSION['midi_notes'], str(path))
+    return send_file(str(path), mimetype='audio/midi', as_attachment=True, download_name='piano_guide.mid')
 
 
 @app.route('/api/analyze', methods=['POST'])

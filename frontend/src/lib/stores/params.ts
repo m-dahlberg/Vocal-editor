@@ -9,7 +9,7 @@ export const params = writable<Params>({
   min_note_duration_ms: 100,
   max_gap_to_bridge_ms: 500,
   silence_threshold_db: -30,
-  transition_ramp_ms: 50,
+  transition_ramp_ms: 100,
   gap_threshold_ms: 150,
   correction_strength: 90,
   midi_threshold_cents: 80,
@@ -36,7 +36,7 @@ export const params = writable<Params>({
     enable_pitchmap: true,
     enable_timemap: true,
   },
-  pitch_engine: 'fd_psola',
+  pitch_engine: 'psola',
   sms: {
     max_harmonics: 60,
     peak_threshold: -80,
@@ -53,7 +53,12 @@ export const params = writable<Params>({
     min_pitch: 75,
     max_pitch: 600,
     time_step: 0.01,
+    resynthesis_method: 'overlap_add',
+    pitch_point_step: 1,
+    pitch_smooth_window_ms: 0,
+    max_shift_semitones: 12,
   },
+  voicing_threshold: 0.75,
   fd_psola: {
     fft_size: 2048,
     window_type: 'kaiser',
@@ -64,6 +69,7 @@ export const params = writable<Params>({
     phase_mode: 'pitch_sync',
     min_pitch: 75,
     max_pitch: 600,
+    kaiser_beta: 8.0,
   },
 });
 

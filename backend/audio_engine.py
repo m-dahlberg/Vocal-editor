@@ -24,7 +24,7 @@ DEFAULT_FREQUENCY_TOLERANCE_CENTS = 100
 DEFAULT_MIN_NOTE_DURATION_MS = 100
 DEFAULT_MAX_GAP_TO_BRIDGE_MS = 500
 DEFAULT_SILENCE_THRESHOLD_DB = -30
-DEFAULT_TRANSITION_RAMP_MS = 50
+DEFAULT_TRANSITION_RAMP_MS = 100
 DEFAULT_GAP_THRESHOLD_MS = 150
 DEFAULT_CORRECTION_STRENGTH = 90
 DEFAULT_MIDI_THRESHOLD_CENTS = 80
@@ -193,6 +193,70 @@ def parse_midi_file(midi_path):
     return notes, f"Loaded {len(notes)} MIDI notes"
 
 
+def freq_to_midi_number(freq):
+    """Convert frequency in Hz to the nearest MIDI note number."""
+    return round(69 + 12 * np.log2(freq / 440.0))
+
+
+def piano_to_midi_notes(audio_path, params, gap_ms=100):
+    """Analyze a monophonic piano audio file and convert detected notes to MIDI format.
+    Each note is stretched to fill until gap_ms before the next note starts."""
+    times, frequencies, notes, sr, audio = analyze_pitch(audio_path, params)
+    clusters_result = cluster_notes(times, frequencies, notes, audio, sr, params)
+
+    midi_notes = []
+    for c in clusters_result:
+        mean_freq = c["mean_freq"]
+        note_number = freq_to_midi_number(mean_freq)
+        midi_notes.append({
+            "start_time": c["start_time"],
+            "end_time": c["end_time"],
+            "note_number": int(note_number),
+            "frequency": float(mean_freq),
+            "note_name": c["note"],
+        })
+
+    # Stretch each note to fill until gap_ms before the next note
+    gap_s = gap_ms / 1000.0
+    for i in range(len(midi_notes) - 1):
+        next_start = midi_notes[i + 1]["start_time"]
+        stretched_end = next_start - gap_s
+        if stretched_end > midi_notes[i]["end_time"]:
+            midi_notes[i]["end_time"] = stretched_end
+
+    return midi_notes, f"Detected {len(midi_notes)} notes from piano guide"
+
+
+def midi_notes_to_file(midi_notes, output_path, bpm=120):
+    """Convert a list of midi_notes dicts to a MIDI file."""
+    mid = mido.MidiFile()
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+
+    tempo = mido.bpm2tempo(bpm)
+    track.append(mido.MetaMessage('set_tempo', tempo=tempo))
+
+    ticks_per_beat = mid.ticks_per_beat
+    sec_per_tick = tempo / ticks_per_beat / 1_000_000.0
+
+    # Build note events sorted by time
+    events = []
+    for n in midi_notes:
+        events.append((n["start_time"], "note_on", n["note_number"], 100))
+        events.append((n["end_time"], "note_off", n["note_number"], 0))
+    events.sort(key=lambda e: e[0])
+
+    prev_time = 0.0
+    for time_s, msg_type, note, vel in events:
+        delta_s = time_s - prev_time
+        delta_ticks = int(round(delta_s / sec_per_tick))
+        track.append(mido.Message(msg_type, note=note, velocity=vel, time=delta_ticks))
+        prev_time = time_s
+
+    mid.save(output_path)
+    return output_path
+
+
 # ============================================
 # PITCH ANALYSIS
 # ============================================
@@ -204,7 +268,9 @@ def analyze_pitch(audio_path, params):
     min_freq = params.get("min_frequency", DEFAULT_MIN_FREQUENCY)
     max_freq = params.get("max_frequency", DEFAULT_MAX_FREQUENCY)
 
-    pitch = call(sound, "To Pitch", time_step, min_freq, max_freq)
+    voicing_threshold = params.get("voicing_threshold", 0.45)
+    pitch = call(sound, "To Pitch (ac)", time_step, min_freq, 15, True,
+                 0.03, voicing_threshold, 0.01, 0.35, 0.14, max_freq)
     time_values = pitch.xs()
 
     frequencies = []
@@ -1203,6 +1269,33 @@ def process_segment(audio, sr, clusters, cluster_idx, params, corrected_audio_pa
             os.remove(pitch_output)
             if len(pitched_seg.shape) > 1:
                 pitched_seg = pitched_seg.mean(axis=1)
+        elif engine == "psola":
+            from psola_engine import run_psola_pitch_shift
+            psola_params = params.get("psola", {}).copy()
+            f0_data = psola_params.pop("_parselmouth_f0", None)
+            seg_f0_times = None
+            seg_f0_freqs = None
+            if f0_data is not None:
+                f0_t = np.asarray(f0_data["times"])
+                f0_f = np.asarray(f0_data["frequencies"])
+                mask = (f0_t >= seg_start) & (f0_t <= seg_end)
+                seg_f0_times = f0_t[mask] - seg_start
+                seg_f0_freqs = f0_f[mask]
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                pitch_output = f.name
+            success, msg = run_psola_pitch_shift(
+                segment, sr, pitch_map, pitch_output, psola_params,
+                original_times=seg_f0_times,
+                original_frequencies=seg_f0_freqs,
+            )
+            if not success:
+                if os.path.exists(pitch_output):
+                    os.remove(pitch_output)
+                return None, msg
+            pitched_seg, _ = sf.read(pitch_output)
+            os.remove(pitch_output)
+            if len(pitched_seg.shape) > 1:
+                pitched_seg = pitched_seg.mean(axis=1)
         else:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 pitch_output = f.name
@@ -1222,27 +1315,56 @@ def process_segment(audio, sr, clusters, cluster_idx, params, corrected_audio_pa
     if has_time:
         duration_s = len(pitched_seg) / sr
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            time_input = f.name
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            time_output = f.name
+        if engine == "psola":
+            from psola_engine import run_psola_time_stretch
+            psola_params = params.get("psola", {}).copy()
+            f0_data = psola_params.pop("_parselmouth_f0", None)
+            seg_f0_times = None
+            seg_f0_freqs = None
+            if f0_data is not None:
+                f0_t = np.asarray(f0_data["times"])
+                f0_f = np.asarray(f0_data["frequencies"])
+                mask = (f0_t >= seg_start) & (f0_t <= seg_end)
+                seg_f0_times = f0_t[mask] - seg_start
+                seg_f0_freqs = f0_f[mask]
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                time_output = f.name
+            try:
+                success, msg = run_psola_time_stretch(
+                    pitched_seg, sr, seg_time_map, time_output, psola_params,
+                    original_times=seg_f0_times,
+                    original_frequencies=seg_f0_freqs,
+                )
+                if not success:
+                    return None, msg
+                processed_seg, _ = sf.read(time_output)
+                if len(processed_seg.shape) > 1:
+                    processed_seg = processed_seg.mean(axis=1)
+            finally:
+                if os.path.exists(time_output):
+                    os.remove(time_output)
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                time_input = f.name
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                time_output = f.name
 
-        sf.write(time_input, pitched_seg, int(sr))
+            sf.write(time_input, pitched_seg, int(sr))
 
-        try:
-            success, msg = run_rubberband_with_timemap(
-                time_input, time_output, seg_time_map, duration_s, rb_params
-            )
-            if not success:
-                return None, msg
+            try:
+                success, msg = run_rubberband_with_timemap(
+                    time_input, time_output, seg_time_map, duration_s, rb_params
+                )
+                if not success:
+                    return None, msg
 
-            processed_seg, _ = sf.read(time_output)
-            if len(processed_seg.shape) > 1:
-                processed_seg = processed_seg.mean(axis=1)
-        finally:
-            for f in [time_input, time_output]:
-                if os.path.exists(f):
-                    os.remove(f)
+                processed_seg, _ = sf.read(time_output)
+                if len(processed_seg.shape) > 1:
+                    processed_seg = processed_seg.mean(axis=1)
+            finally:
+                for f in [time_input, time_output]:
+                    if os.path.exists(f):
+                        os.remove(f)
     else:
         processed_seg = pitched_seg
 

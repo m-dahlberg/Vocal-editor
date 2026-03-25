@@ -103,6 +103,7 @@ export interface Params {
   max_note_compress: number;    // min size as % of original (e.g. 50 = can halve)
   max_gap_stretch: number;      // max stretch as % of original
   max_gap_compress: number;     // min size as % of original (0 = can fully remove)
+  voicing_threshold: number;
   rb: RubberbandParams;
   pitch_engine: PitchEngine;
   sms: SMSParams;
@@ -138,6 +139,10 @@ export interface PSOLAParams {
   min_pitch: number;
   max_pitch: number;
   time_step: number;
+  resynthesis_method: string;
+  pitch_point_step: number;
+  pitch_smooth_window_ms: number;
+  max_shift_semitones: number;
 }
 
 export interface FDPSOLAParams {
@@ -150,6 +155,7 @@ export interface FDPSOLAParams {
   phase_mode: string;
   min_pitch: number;
   max_pitch: number;
+  kaiser_beta: number;
 }
 
 export type PitchEngine = 'rubberband' | 'sms' | 'psola' | 'fd_psola';
