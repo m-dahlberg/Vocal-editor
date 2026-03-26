@@ -178,6 +178,14 @@ export interface TimeEdit {
   newEnd: number;
 }
 
+export interface StretchMarker {
+  id: string;
+  originalTime: number;
+  currentTime: number;
+  leftClusterIdx: number;
+  rightClusterIdx: number;
+}
+
 export interface TimemapEntry {
   source_s: number;
   target_s: number;

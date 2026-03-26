@@ -16,7 +16,8 @@
     clusters, times, frequencies, originalTimes, originalFrequencies,
     midiNotes, midiWarnings, selectedIdx, selectedIndices, dirtyClusters,
     audioLoaded, audioUrl, processing, log,
-    activeTab, timeEdits, dirtyTimeEdits, backendTimemap, advancedView
+    activeTab, timeEdits, dirtyTimeEdits, backendTimemap, advancedView,
+    stretchMarkers, dirtyStretchMarkers
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
@@ -382,6 +383,8 @@
       $dirtyClusters = new Set();
       $timeEdits = [];
       $dirtyTimeEdits = new Set();
+      $stretchMarkers = [];
+      $dirtyStretchMarkers = false;
       $backendTimemap = [];
       $selectedIndices = new Set();
 
@@ -421,7 +424,7 @@
           smoothing_percent: c.smoothing_percent,
           manually_edited: c.manually_edited || false,
         }));
-        const syncResult = await api.syncClusters(clusterUpdates, get(timeEdits));
+        const syncResult = await api.syncClusters(clusterUpdates, get(timeEdits), undefined, get(stretchMarkers));
         if (syncResult.error) {
           log(`Error syncing: ${syncResult.error}`, 'error');
           return;
@@ -459,7 +462,7 @@
         smoothing_percent: c.smoothing_percent,
         manually_edited: c.manually_edited || false,
       }));
-      const syncResult2 = await api.syncClusters(clusterUpdates2, get(timeEdits));
+      const syncResult2 = await api.syncClusters(clusterUpdates2, get(timeEdits), undefined, get(stretchMarkers));
       if (syncResult2.error) {
         log(`Error applying: ${syncResult2.error}`, 'error');
         return;
@@ -474,6 +477,7 @@
       $audioUrl = api.audioUrl();
       $dirtyClusters = new Set();
       $dirtyTimeEdits = new Set();
+      $dirtyStretchMarkers = false;
 
       log('Corrections applied');
     } catch (e: any) {
@@ -514,7 +518,7 @@
           smoothing_percent: c.smoothing_percent,
           manually_edited: c.manually_edited || false,
         }));
-        const syncResult = await api.syncClusters(clusterUpdates, get(timeEdits));
+        const syncResult = await api.syncClusters(clusterUpdates, get(timeEdits), undefined, get(stretchMarkers));
         if (syncResult.error) {
           log(`Error syncing: ${syncResult.error}`, 'error');
           return;
@@ -550,6 +554,9 @@
         else if (di > idx) newDirtyTime.add(di - 1);
       }
       $dirtyTimeEdits = newDirtyTime;
+      // Regenerate stretch markers for updated cluster list
+      $stretchMarkers = [];
+      $dirtyStretchMarkers = false;
 
       $clusters = result.clusters;
       $selectedIdx = null;
@@ -621,6 +628,9 @@
     $timeEdits = edits;
     $dirtyClusters = dirty;
     $dirtyTimeEdits = dirtyTime;
+    // Regenerate stretch markers for the new cluster list
+    $stretchMarkers = [];
+    $dirtyStretchMarkers = false;
     $selectedIdx = null;
     $selectedIndices = new Set();
   }
@@ -629,22 +639,23 @@
 
   async function applyTimeEdits() {
     const edits = get(timeEdits);
+    const markers = get(stretchMarkers);
     const cls = get(clusters);
     const hasPitchEdits = cls.some(c => c.pitch_shift_semitones !== 0 || (c.smoothing_percent ?? 0) !== 0);
 
-    console.log('[applyTimeEdits] edits:', edits.length, 'dirtyClusters:', get(dirtyClusters).size, 'dirtyTimeEdits:', get(dirtyTimeEdits).size);
-    console.log('[applyTimeEdits] edits data:', JSON.stringify(edits));
+    const movedMarkers = markers.filter(m => Math.abs(m.currentTime - m.originalTime) > 0.0001);
 
-    if (edits.length === 0 && get(dirtyClusters).size === 0) {
+    console.log('[applyTimeEdits] edits:', edits.length, 'markers:', movedMarkers.length, 'dirtyClusters:', get(dirtyClusters).size);
+
+    if (edits.length === 0 && movedMarkers.length === 0 && get(dirtyClusters).size === 0) {
       log('No edits to apply', 'warn');
       return;
     }
 
     $processing = true;
-    log(`Applying ${edits.length} time edit(s)${hasPitchEdits ? ' + pitch edits' : ''}...`);
+    log(`Applying ${movedMarkers.length} marker(s)${edits.length > 0 ? ` + ${edits.length} time edit(s)` : ''}${hasPitchEdits ? ' + pitch edits' : ''}...`);
 
     try {
-      // Use unified sync_clusters path so both pitch and time edits are applied together
       const clusterUpdates = cls.map((c, idx) => ({
         idx,
         start_time: c.start_time,
@@ -659,7 +670,7 @@
         manually_edited: c.manually_edited || false,
       }));
 
-      const result = await api.syncClusters(clusterUpdates, edits);
+      const result = await api.syncClusters(clusterUpdates, edits, undefined, markers);
 
       if (result.error) {
         log(`Error: ${result.error}`, 'error');
@@ -670,6 +681,7 @@
       $audioUrl = api.audioUrl();
       $dirtyClusters = new Set();
       $dirtyTimeEdits = new Set();
+      $dirtyStretchMarkers = false;
       if (result.timemap) {
         $backendTimemap = result.timemap;
       }
@@ -680,6 +692,13 @@
     } finally {
       $processing = false;
     }
+  }
+
+  function resetAllMarkers() {
+    const markers = get(stretchMarkers);
+    $stretchMarkers = markers.map(m => ({ ...m, currentTime: m.originalTime }));
+    $dirtyStretchMarkers = false;
+    $backendTimemap = [];
   }
 
   // --- Playhead sync ---
@@ -748,6 +767,7 @@
       onAnalyze={runAnalyze}
       onApplyTimeEdits={applyTimeEdits}
       onExport={runExport}
+      onResetMarkers={resetAllMarkers}
     />
   {/if}
 

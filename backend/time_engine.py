@@ -21,6 +21,61 @@ from audio_engine import (
 )
 
 
+def generate_time_map_from_markers(clusters, markers, sr, audio_length):
+    """
+    Build time map from stretch markers.
+
+    Each marker has: id, originalTime, currentTime, leftClusterIdx, rightClusterIdx.
+    Moved markers produce keypoints at (originalTime, currentTime).
+    All cluster boundaries not adjacent to a moved marker get identity anchors.
+
+    Returns list of (source_frame, target_frame) pairs sorted by source frame.
+    """
+    if not markers:
+        return []
+
+    # Check if any marker has actually been moved
+    moved_markers = [m for m in markers if abs(m['originalTime'] - m['currentTime']) > 0.0001]
+    if not moved_markers:
+        return []
+
+    keyframes = set()
+    keyframes.add((0, 0))
+    keyframes.add((audio_length - 1, audio_length - 1))
+
+    # Build set of cluster indices adjacent to moved markers
+    moved_adjacent = set()
+    for m in moved_markers:
+        src_frame = int(m['originalTime'] * sr)
+        tgt_frame = int(m['currentTime'] * sr)
+        keyframes.add((src_frame, tgt_frame))
+        moved_adjacent.add(m.get('leftClusterIdx'))
+        moved_adjacent.add(m.get('rightClusterIdx'))
+
+    # Pin all cluster boundaries not adjacent to a moved marker as identity anchors
+    for i, c in enumerate(clusters):
+        src_start = int(c['start_time'] * sr)
+        src_end = int(c['end_time'] * sr)
+
+        # Check if this cluster's start boundary is adjacent to a moved marker
+        # (i.e., there's a moved marker between cluster i-1 and cluster i)
+        start_has_moved = False
+        end_has_moved = False
+        for m in moved_markers:
+            if m.get('rightClusterIdx') == i:
+                start_has_moved = True
+            if m.get('leftClusterIdx') == i:
+                end_has_moved = True
+
+        if not start_has_moved:
+            keyframes.add((src_start, src_start))
+        if not end_has_moved:
+            keyframes.add((src_end, src_end))
+
+    result = sorted(keyframes, key=lambda x: x[0])
+    return result
+
+
 def generate_time_map(clusters, time_edits, sr, audio_length):
     """
     Build Rubberband --timemap from time edits.
@@ -194,7 +249,7 @@ def process_time_stretch(audio, sr, clusters, time_edits, rb_params, output_path
             os.remove(temp_input)
 
 
-def process_combined(audio, sr, clusters, params, time_edits, output_path):
+def process_combined(audio, sr, clusters, params, time_edits, output_path, stretch_markers=None):
     """
     Process audio with both pitch corrections and time stretching.
 
@@ -215,8 +270,11 @@ def process_combined(audio, sr, clusters, params, time_edits, output_path):
     smooth_curve = params.get('smooth_curve', DEFAULT_SMOOTH_CURVE)
     pitch_map = generate_pitch_map(clusters, sr, audio_length, gap_threshold, smooth_curve)
 
-    # Generate time map from time edits
-    time_map = generate_time_map(clusters, time_edits, sr, audio_length)
+    # Generate time map from stretch markers (preferred) or time edits (legacy)
+    if stretch_markers:
+        time_map = generate_time_map_from_markers(clusters, stretch_markers, sr, audio_length)
+    else:
+        time_map = generate_time_map(clusters, time_edits, sr, audio_length)
 
     rb_params = params.get('rb', {})
 

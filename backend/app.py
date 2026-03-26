@@ -63,6 +63,7 @@ SESSION = {
     'corrected_path': None,
     'params': {},
     'time_edits': [],
+    'stretch_markers': [],
     'reference_path': None,
     'reference_clusters': [],
     'backing_path': None,
@@ -149,6 +150,7 @@ def upload_audio():
     SESSION['corrected_path'] = str(UPLOAD_DIR / f"corrected_{uuid.uuid4().hex}.wav")
     SESSION['params'] = get_default_params()
     SESSION['time_edits'] = []
+    SESSION['stretch_markers'] = []
     SESSION['audio'] = None
     SESSION['sr'] = None
     SESSION['times'] = None
@@ -298,6 +300,7 @@ def analyze():
         clusters = cluster_notes(times, frequencies, notes, audio, sr, SESSION['params'])
         SESSION['clusters'] = clusters
         SESSION['time_edits'] = []
+        SESSION['stretch_markers'] = []
 
         # Copy original to corrected path
         audio_mono = get_audio_mono(audio)
@@ -405,13 +408,25 @@ def sync_clusters():
                 SESSION['sms_analysis'] = None
                 print("[SMS] Cache invalidated due to analysis param change")
 
-    # Always overwrite time_edits — default to empty to clear stale edits
+    # Accept stretch_markers (new) or time_edits (legacy)
+    incoming_stretch_markers = data.get('stretch_markers', [])
+    SESSION['stretch_markers'] = [
+        {
+            'id': str(m['id']),
+            'originalTime': float(m['originalTime']),
+            'currentTime': float(m['currentTime']),
+            'leftClusterIdx': int(m['leftClusterIdx']),
+            'rightClusterIdx': int(m['rightClusterIdx']),
+        }
+        for m in incoming_stretch_markers
+    ]
+
     incoming_time_edits = data.get('time_edits', [])
     SESSION['time_edits'] = [
         {'cluster_idx': int(e['clusterIdx']), 'new_start': float(e['newStart']), 'new_end': float(e['newEnd'])}
         for e in incoming_time_edits
     ]
-    print(f"[DEBUG] sync_clusters: received {len(incoming_time_edits)} time_edits from client")
+    print(f"[DEBUG] sync_clusters: received {len(incoming_stretch_markers)} stretch_markers, {len(incoming_time_edits)} time_edits from client")
 
     print(f"[DEBUG] sync_clusters: {len(incoming)} clusters incoming, {len(SESSION['time_edits'])} time_edits active")
     if incoming:
@@ -507,6 +522,7 @@ def sync_clusters():
             SESSION['audio'], SESSION['sr'],
             SESSION['clusters'], SESSION['params'],
             SESSION['time_edits'], SESSION['corrected_path'],
+            stretch_markers=SESSION.get('stretch_markers', []),
         )
 
         # Store updated SMS cache
@@ -546,11 +562,16 @@ def sync_clusters():
             resp['corrected_times'] = corrected_times
             resp['corrected_freqs'] = corrected_freqs
 
-        # Return timemap if time edits are active
-        if SESSION['time_edits']:
-            from time_engine import generate_time_map
+        # Return timemap if time edits or stretch markers are active
+        if SESSION.get('stretch_markers') or SESSION['time_edits']:
+            from time_engine import generate_time_map, generate_time_map_from_markers
             audio_mono = get_audio_mono(SESSION['audio'])
-            actual_timemap = generate_time_map(SESSION['clusters'], SESSION['time_edits'], SESSION['sr'], len(audio_mono))
+            if SESSION.get('stretch_markers'):
+                actual_timemap = generate_time_map_from_markers(
+                    SESSION['clusters'], SESSION['stretch_markers'], SESSION['sr'], len(audio_mono))
+            else:
+                actual_timemap = generate_time_map(
+                    SESSION['clusters'], SESSION['time_edits'], SESSION['sr'], len(audio_mono))
             resp['timemap'] = [
                 {'source_s': src / SESSION['sr'], 'target_s': tgt / SESSION['sr']}
                 for src, tgt in actual_timemap
@@ -801,6 +822,7 @@ def reset_edits():
         cluster['manually_edited'] = False
         cluster['pitch_shift_semitones'] = 0.0
     SESSION['time_edits'] = []
+    SESSION['stretch_markers'] = []
 
     return jsonify({'ok': True, 'clusters': clusters_to_json(SESSION['clusters'])})
 
@@ -847,6 +869,7 @@ def export_audio():
                 SESSION['audio'], SESSION['sr'],
                 SESSION['clusters'], SESSION['params'],
                 SESSION['time_edits'], SESSION['corrected_path'],
+                stretch_markers=SESSION.get('stretch_markers', []),
             )
             if SESSION['params'].get('pitch_engine') == 'sms':
                 cache_ref = SESSION['params'].pop('_sms_cache_ref', [None])
@@ -960,9 +983,21 @@ def sync_time_edits():
         return jsonify({'error': 'No clusters - run analyze first'}), 400
 
     data = request.json or {}
-    incoming_edits = data.get('time_edits', [])
 
-    # Convert to internal format
+    # Accept stretch_markers (new) or time_edits (legacy)
+    incoming_stretch_markers = data.get('stretch_markers', [])
+    SESSION['stretch_markers'] = [
+        {
+            'id': str(m['id']),
+            'originalTime': float(m['originalTime']),
+            'currentTime': float(m['currentTime']),
+            'leftClusterIdx': int(m['leftClusterIdx']),
+            'rightClusterIdx': int(m['rightClusterIdx']),
+        }
+        for m in incoming_stretch_markers
+    ]
+
+    incoming_edits = data.get('time_edits', [])
     time_edits = []
     for edit in incoming_edits:
         time_edits.append({
@@ -972,10 +1007,12 @@ def sync_time_edits():
         })
 
     SESSION['time_edits'] = time_edits
-    print(f"[DEBUG] sync_time_edits: {len(time_edits)} time edits received")
+    print(f"[DEBUG] sync_time_edits: {len(incoming_stretch_markers)} stretch_markers, {len(time_edits)} time edits received")
 
     try:
-        from time_engine import process_combined, process_time_stretch, generate_time_map
+        from time_engine import process_combined, process_time_stretch, generate_time_map, generate_time_map_from_markers
+
+        stretch_markers = SESSION.get('stretch_markers', [])
 
         # Check if there are also pitch edits
         has_pitch = any(
@@ -1004,6 +1041,7 @@ def sync_time_edits():
                 SESSION['audio'], SESSION['sr'],
                 SESSION['clusters'], SESSION['params'],
                 time_edits, SESSION['corrected_path'],
+                stretch_markers=stretch_markers,
             )
             if SESSION['params'].get('pitch_engine') == 'sms':
                 cache_ref = SESSION['params'].pop('_sms_cache_ref', [None])
@@ -1011,12 +1049,24 @@ def sync_time_edits():
                 if cache_ref[0] is not None:
                     SESSION['sms_analysis'] = cache_ref[0]
         else:
-            # Time-only processing
-            rb_params = SESSION['params'].get('rb', {})
-            success, msg = process_time_stretch(
+            # Time-only processing — use process_combined for stretch markers support
+            if SESSION['params'].get('pitch_engine') == 'psola':
+                if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+                    SESSION['params']['psola']['_parselmouth_f0'] = {
+                        'times': SESSION['times'],
+                        'frequencies': SESSION['frequencies'],
+                    }
+            elif SESSION['params'].get('pitch_engine') == 'fd_psola':
+                if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+                    SESSION['params']['fd_psola']['_parselmouth_f0'] = {
+                        'times': SESSION['times'],
+                        'frequencies': SESSION['frequencies'],
+                    }
+            success, msg = process_combined(
                 SESSION['audio'], SESSION['sr'],
-                SESSION['clusters'], time_edits,
-                rb_params, SESSION['corrected_path'],
+                SESSION['clusters'], SESSION['params'],
+                time_edits, SESSION['corrected_path'],
+                stretch_markers=stretch_markers,
             )
 
         if not success:
@@ -1029,8 +1079,10 @@ def sync_time_edits():
         audio_mono = get_audio_mono(SESSION['audio'])
         audio_length = len(audio_mono)
         sr = SESSION['sr']
-        actual_timemap = generate_time_map(SESSION['clusters'], time_edits, sr, audio_length)
-        # Convert frame pairs to seconds for easy comparison
+        if stretch_markers:
+            actual_timemap = generate_time_map_from_markers(SESSION['clusters'], stretch_markers, sr, audio_length)
+        else:
+            actual_timemap = generate_time_map(SESSION['clusters'], time_edits, sr, audio_length)
         timemap_seconds = [
             {'source_s': src / sr, 'target_s': tgt / sr}
             for src, tgt in actual_timemap

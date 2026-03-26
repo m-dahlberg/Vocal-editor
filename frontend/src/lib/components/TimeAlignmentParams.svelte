@@ -1,16 +1,18 @@
 <script lang="ts">
   import { params } from '$lib/stores/params';
-  import { clusters } from '$lib/stores/appState';
+  import { clusters, stretchMarkers } from '$lib/stores/appState';
 
   interface Props {
     onAnalyze: () => void;
     onApplyTimeEdits: () => void;
     onExport: () => void;
+    onResetMarkers?: () => void;
   }
 
-  let { onAnalyze, onApplyTimeEdits, onExport }: Props = $props();
+  let { onAnalyze, onApplyTimeEdits, onExport, onResetMarkers }: Props = $props();
 
   const hasPitchEdits = $derived($clusters.some(c => c.pitch_shift_semitones !== 0 || (c.smoothing_percent ?? 0) !== 0));
+  const movedMarkerCount = $derived($stretchMarkers.filter(m => Math.abs(m.currentTime - m.originalTime) > 0.0001).length);
 </script>
 
 <aside class="param-panel">
@@ -26,6 +28,22 @@
       <label>Min note duration (ms)<input type="number" bind:value={$params.min_note_duration_ms}></label>
       <label>Max gap to bridge (ms)<input type="number" bind:value={$params.max_gap_to_bridge_ms}></label>
       <label>Silence threshold (dB)<input type="number" bind:value={$params.silence_threshold_db}></label>
+    </div>
+  </section>
+
+  <section>
+    <h3>Stretch Markers</h3>
+    <div class="param-group">
+      <div class="marker-info">
+        {#if $stretchMarkers.length > 0}
+          <span>{$stretchMarkers.length} markers · {movedMarkerCount} moved</span>
+        {:else}
+          <span class="dim">No markers (analyze audio first)</span>
+        {/if}
+      </div>
+      {#if movedMarkerCount > 0 && onResetMarkers}
+        <button class="btn btn-small" onclick={onResetMarkers}>Reset All Markers</button>
+      {/if}
     </div>
   </section>
 
@@ -55,24 +73,6 @@
     </div>
   </section>
 
-  <section>
-    <h3>Correction Limits</h3>
-    <div class="param-group">
-      <label>Note max stretch ({$params.max_note_stretch}%)
-        <input type="range" min="100" max="500" step="10" bind:value={$params.max_note_stretch}>
-      </label>
-      <label>Note max compress ({$params.max_note_compress}%)
-        <input type="range" min="0" max="100" step="5" bind:value={$params.max_note_compress}>
-      </label>
-      <label>Gap max stretch ({$params.max_gap_stretch}%)
-        <input type="range" min="100" max="500" step="10" bind:value={$params.max_gap_stretch}>
-      </label>
-      <label>Gap max compress ({$params.max_gap_compress}%)
-        <input type="range" min="0" max="100" step="5" bind:value={$params.max_gap_compress}>
-      </label>
-    </div>
-  </section>
-
   {#if hasPitchEdits}
     <div class="cross-tab-info">+ pitch edits will also be applied</div>
   {/if}
@@ -93,5 +93,18 @@
     background: rgba(255, 0, 170, 0.08);
     border-radius: 4px;
     text-align: center;
+  }
+  .marker-info {
+    font-size: 0.8rem;
+    color: var(--text2, #ccc);
+    padding: 2px 0;
+  }
+  .marker-info .dim {
+    opacity: 0.5;
+  }
+  .btn-small {
+    padding: 3px 8px;
+    font-size: 0.72rem;
+    margin-top: 4px;
   }
 </style>

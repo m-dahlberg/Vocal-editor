@@ -1,4 +1,4 @@
-import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, TimeEdit, TimeStretchResult } from '$lib/utils/types';
+import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, TimeEdit, TimeStretchResult, StretchMarker } from '$lib/utils/types';
 
 async function post(url: string, body?: object): Promise<any> {
   const opts: RequestInit = { method: 'POST' };
@@ -62,9 +62,10 @@ export async function deleteCluster(clusterIdx: number): Promise<any> {
   return post('/api/delete_cluster', { cluster_idx: clusterIdx });
 }
 
-export async function syncClusters(clusterList: Partial<Cluster>[], timeEdits?: TimeEdit[], params?: Partial<Params>): Promise<SyncResult> {
+export async function syncClusters(clusterList: Partial<Cluster>[], timeEdits?: TimeEdit[], params?: Partial<Params>, stretchMarkers?: StretchMarker[]): Promise<SyncResult> {
   const body: Record<string, unknown> = { clusters: clusterList };
   body.time_edits = timeEdits ?? [];
+  body.stretch_markers = stretchMarkers ?? [];
   if (params) body.params = params;
   return post('/api/sync_clusters', body);
 }
@@ -100,6 +101,6 @@ export function exportUrl(): string {
   return '/api/export';
 }
 
-export async function syncTimeEdits(edits: TimeEdit[]): Promise<TimeStretchResult> {
-  return post('/api/sync_time_edits', { time_edits: edits });
+export async function syncTimeEdits(edits: TimeEdit[], stretchMarkers?: StretchMarker[]): Promise<TimeStretchResult> {
+  return post('/api/sync_time_edits', { time_edits: edits, stretch_markers: stretchMarkers ?? [] });
 }

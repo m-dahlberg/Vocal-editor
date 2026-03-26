@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { selectedCluster, selectedIdx, clusters, timeEdits } from '$lib/stores/appState';
+  import { selectedCluster, selectedIdx, clusters, stretchMarkers } from '$lib/stores/appState';
   import { params } from '$lib/stores/params';
 
   interface Props {
@@ -10,10 +10,14 @@
 
   let processingSegment = $state(false);
 
-  // Find the time edit for the currently selected cluster
-  let edit = $derived.by(() => {
-    if ($selectedIdx === null) return null;
-    return $timeEdits.find(e => e.clusterIdx === $selectedIdx) ?? null;
+  // Find stretch markers adjacent to the selected cluster
+  let adjacentMarkers = $derived.by(() => {
+    if ($selectedIdx === null) return { left: null, right: null };
+    const idx = $selectedIdx;
+    const markers = $stretchMarkers;
+    const left = markers.find(m => m.rightClusterIdx === idx) ?? null;
+    const right = markers.find(m => m.leftClusterIdx === idx) ?? null;
+    return { left, right };
   });
 
   let originalCluster = $derived.by(() => {
@@ -21,12 +25,17 @@
     return $clusters[$selectedIdx] ?? null;
   });
 
-  let newStart = $derived(edit ? edit.newStart : (originalCluster?.start_time ?? 0));
-  let newEnd = $derived(edit ? edit.newEnd : (originalCluster?.end_time ?? 0));
   let origDuration = $derived(originalCluster ? (originalCluster.end_time - originalCluster.start_time) * 1000 : 0);
-  let newDuration = $derived((newEnd - newStart) * 1000);
-  let timeShiftMs = $derived(edit ? (edit.newStart - (originalCluster?.start_time ?? 0)) * 1000 : 0);
-  let tempoRatio = $derived(newDuration > 0 ? origDuration / newDuration : 1);
+
+  // Compute effective time shift from adjacent markers
+  let leftDeltaMs = $derived(adjacentMarkers.left
+    ? (adjacentMarkers.left.currentTime - adjacentMarkers.left.originalTime) * 1000
+    : 0);
+  let rightDeltaMs = $derived(adjacentMarkers.right
+    ? (adjacentMarkers.right.currentTime - adjacentMarkers.right.originalTime) * 1000
+    : 0);
+
+  let movedMarkerCount = $derived($stretchMarkers.filter(m => Math.abs(m.currentTime - m.originalTime) > 0.0001).length);
 </script>
 
 <aside class="cluster-panel">
@@ -41,50 +50,47 @@
         <span class="label">Note</span>
         <span class="value">{$selectedCluster.note}</span>
       </div>
-
-      <div style="margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px;">
-        <div style="font-size:0.75rem; color:var(--accent2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;">Original</div>
-      </div>
-      <div class="cluster-detail-row">
-        <span class="label">Start</span>
-        <span class="value">{originalCluster.start_time.toFixed(3)}s</span>
-      </div>
-      <div class="cluster-detail-row">
-        <span class="label">End</span>
-        <span class="value">{originalCluster.end_time.toFixed(3)}s</span>
-      </div>
       <div class="cluster-detail-row">
         <span class="label">Duration</span>
         <span class="value">{origDuration.toFixed(0)} ms</span>
       </div>
-
-      <div style="margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px;">
-        <div style="font-size:0.75rem; color:var(--accent2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;">Edited</div>
-      </div>
       <div class="cluster-detail-row">
-        <span class="label">Start</span>
-        <span class="value" class:edited={edit !== null}>{newStart.toFixed(3)}s</span>
-      </div>
-      <div class="cluster-detail-row">
-        <span class="label">End</span>
-        <span class="value" class:edited={edit !== null}>{newEnd.toFixed(3)}s</span>
-      </div>
-      <div class="cluster-detail-row">
-        <span class="label">Duration</span>
-        <span class="value" class:edited={edit !== null}>{newDuration.toFixed(0)} ms</span>
+        <span class="label">Range</span>
+        <span class="value">{originalCluster.start_time.toFixed(3)}s – {originalCluster.end_time.toFixed(3)}s</span>
       </div>
 
       <div style="margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px;">
-        <div style="font-size:0.75rem; color:var(--accent2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;">Delta</div>
+        <div style="font-size:0.75rem; color:var(--accent2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;">Adjacent Markers</div>
       </div>
-      <div class="cluster-detail-row">
-        <span class="label">Time shift</span>
-        <span class="value">{timeShiftMs.toFixed(1)} ms</span>
-      </div>
-      <div class="cluster-detail-row">
-        <span class="label">Tempo ratio</span>
-        <span class="value">{tempoRatio.toFixed(3)}</span>
-      </div>
+
+      {#if adjacentMarkers.left}
+        <div class="cluster-detail-row">
+          <span class="label">Left marker</span>
+          <span class="value" class:edited={leftDeltaMs !== 0}>
+            {leftDeltaMs !== 0 ? `${leftDeltaMs > 0 ? '+' : ''}${leftDeltaMs.toFixed(1)}ms` : 'unchanged'}
+          </span>
+        </div>
+      {:else}
+        <div class="cluster-detail-row">
+          <span class="label">Left marker</span>
+          <span class="value dim">none (first cluster)</span>
+        </div>
+      {/if}
+
+      {#if adjacentMarkers.right}
+        <div class="cluster-detail-row">
+          <span class="label">Right marker</span>
+          <span class="value" class:edited={rightDeltaMs !== 0}>
+            {rightDeltaMs !== 0 ? `${rightDeltaMs > 0 ? '+' : ''}${rightDeltaMs.toFixed(1)}ms` : 'unchanged'}
+          </span>
+        </div>
+      {:else}
+        <div class="cluster-detail-row">
+          <span class="label">Right marker</span>
+          <span class="value dim">none (last cluster)</span>
+        </div>
+      {/if}
+
       <div style="margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px;">
         <div style="font-size:0.75rem; color:var(--accent2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;">Segment processing</div>
       </div>
@@ -134,7 +140,10 @@
         {processingSegment ? 'Processing...' : 'Process Segment'}
       </button>
     {:else}
-      <p class="placeholder">Click a note box to select it</p>
+      <p class="placeholder">Click a note region to select it</p>
+      {#if movedMarkerCount > 0}
+        <div class="marker-summary">{movedMarkerCount} marker{movedMarkerCount > 1 ? 's' : ''} moved</div>
+      {/if}
     {/if}
   </div>
 </aside>
@@ -142,6 +151,18 @@
 <style>
   .edited {
     color: var(--warning) !important;
+  }
+  .dim {
+    opacity: 0.5;
+  }
+  .marker-summary {
+    padding: 6px 10px;
+    margin-top: 8px;
+    font-size: 0.75rem;
+    color: #2dd4bf;
+    background: rgba(45,212,191,0.08);
+    border-radius: 4px;
+    text-align: center;
   }
   .process-segment-btn {
     width: 100%;
