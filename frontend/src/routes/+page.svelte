@@ -16,7 +16,7 @@
     clusters, times, frequencies, originalTimes, originalFrequencies,
     midiNotes, midiWarnings, selectedIdx, selectedIndices, dirtyClusters,
     audioLoaded, audioUrl, processing, log,
-    activeTab, timeEdits, dirtyTimeEdits, backendTimemap
+    activeTab, timeEdits, dirtyTimeEdits, backendTimemap, advancedView
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
@@ -26,6 +26,11 @@
   let pitchPlot: PitchPlot;
   let timeAlignmentView: TimeAlignmentView;
   let waveformPlayer: WaveformPlayer;
+
+  // Force back to pitch tab when switching to simple mode
+  $: if (!$advancedView && $activeTab === 'time') {
+    $activeTab = 'pitch';
+  }
 
   // --- Pitch curve helpers ---
 
@@ -779,7 +784,9 @@
       {onTimeUpdate}
     />
 
+    {#if $advancedView}
     <LogPanel />
+    {/if}
   </main>
 
   <div class="right-panel">

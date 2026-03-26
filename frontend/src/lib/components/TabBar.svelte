@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeTab, timeEdits, clusters } from '$lib/stores/appState';
+  import { activeTab, timeEdits, clusters, advancedView } from '$lib/stores/appState';
 
   const hasTimeEdits = $derived($timeEdits.length > 0);
   const hasPitchEdits = $derived($clusters.some(c => c.pitch_shift_semitones !== 0 || (c.smoothing_percent ?? 0) !== 0));
@@ -16,6 +16,7 @@
       <span class="badge" title="Time edits active"></span>
     {/if}
   </button>
+  {#if $advancedView}
   <button
     class="tab-btn"
     class:active={$activeTab === 'time'}
@@ -26,6 +27,7 @@
       <span class="badge" title="Pitch edits active"></span>
     {/if}
   </button>
+  {/if}
 </div>
 
 <style>

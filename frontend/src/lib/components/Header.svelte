@@ -6,7 +6,8 @@
     processing, clusters, times, frequencies, originalTimes, originalFrequencies,
     midiNotes, avgPitchDeviation, audioUrl, dirtyClusters, log,
     referenceClusters, referenceLoaded, backingLoaded,
-    waveformReset, selectedIdx, selectedIndices, timeEdits, dirtyTimeEdits, backendTimemap
+    waveformReset, selectedIdx, selectedIndices, timeEdits, dirtyTimeEdits, backendTimemap,
+    advancedView
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
 
@@ -232,6 +233,58 @@
     <label class="checkbox-label">
       <input type="checkbox" bind:checked={$showCorrectionCurve}> Correction
     </label>
+    <label class="view-toggle">
+      <span class="view-toggle-label">{$advancedView ? 'Advanced' : 'Simple'}</span>
+      <span class="toggle-switch" class:active={$advancedView}>
+        <input type="checkbox" bind:checked={$advancedView} hidden>
+        <span class="toggle-track">
+          <span class="toggle-thumb"></span>
+        </span>
+      </span>
+    </label>
     <button class="btn btn-secondary" onclick={() => $showHelp = true}>Help</button>
   </div>
 </header>
+
+<style>
+  .view-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .view-toggle-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .toggle-track {
+    display: block;
+    width: 32px;
+    height: 18px;
+    background: var(--bg3);
+    border-radius: 9px;
+    position: relative;
+    transition: background 0.2s;
+    border: 1px solid var(--border);
+  }
+  .toggle-switch.active .toggle-track {
+    background: var(--accent);
+  }
+  .toggle-thumb {
+    display: block;
+    width: 14px;
+    height: 14px;
+    background: var(--text);
+    border-radius: 50%;
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    transition: transform 0.2s;
+  }
+  .toggle-switch.active .toggle-thumb {
+    transform: translateX(14px);
+    background: var(--bg1);
+  }
+</style>

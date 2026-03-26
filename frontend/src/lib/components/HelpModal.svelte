@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { showHelp } from '$lib/stores/appState';
+  import { showHelp, advancedView } from '$lib/stores/appState';
 
   function close() {
     $showHelp = false;
@@ -36,57 +36,125 @@
 
       <hr>
 
-      <h2>Pitch Plot Controls</h2>
+      <h2>Pitch Plot Interactions</h2>
 
       <h3>Selecting Notes</h3>
       <ul>
         <li><strong>Click a box</strong> — Select that cluster.</li>
-        <li><strong>Shift + Click</strong> — Add/remove from multi-selection.</li>
+        <li><strong>Shift + Click a box</strong> — Add/remove from multi-selection.</li>
         <li><strong>Drag on empty space</strong> — Rubber-band select multiple clusters.</li>
-        <li><strong>Click empty space</strong> — Clear selection.</li>
+        <li><strong>Click empty space</strong> — Clear selection and move the playhead to that time.</li>
       </ul>
 
       <h3>Adjusting Pitch</h3>
       <ul>
-        <li><strong>Drag a box up/down</strong> — Shift pitch in semitones. Multi-selection moves together.</li>
+        <li><strong>Drag a box up/down</strong> — Shift pitch in semitones. If multiple clusters are selected, they all move together. A sine tone preview plays while dragging to help you find the right pitch.</li>
       </ul>
 
       <h3>Adjusting Timing</h3>
       <ul>
-        <li><strong>Drag left/right edge</strong> — Resize cluster boundaries.</li>
+        <li><strong>Drag the left or right edge of a box</strong> — Resize cluster boundaries (change start/end time). The cursor changes to a horizontal resize arrow when hovering near an edge.</li>
       </ul>
 
       <h3>Adjusting Ramps</h3>
       <ul>
-        <li><strong>Ctrl + Drag edge</strong> — Adjust ramp in/out duration. Ramps control how quickly the pitch correction fades in/out at the edges of a cluster, creating smooth transitions.</li>
+        <li><strong>Ctrl + Drag a box edge</strong> — Adjust ramp in (left edge) or ramp out (right edge) duration. Ramps control how quickly the pitch correction fades in/out at the edges of a cluster, creating smooth transitions instead of abrupt pitch jumps.</li>
       </ul>
 
       <h3>Adjusting Smoothing</h3>
       <ul>
-        <li><strong>Ctrl + Drag body vertically</strong> — Adjust smoothing percentage. Higher smoothing flattens pitch variation within the cluster (removes vibrato/wobble).</li>
+        <li><strong>Ctrl + Drag a box body vertically</strong> — Adjust the smoothing percentage. Drag up to increase, down to decrease. Higher smoothing flattens pitch variation within the cluster (removes vibrato/wobble).</li>
       </ul>
 
       <h3>Drawing New Clusters</h3>
       <ul>
-        <li><strong>Alt + Drag</strong> — Draw a new note cluster in empty space.</li>
+        <li><strong>Alt + Drag</strong> — Draw a new note cluster in empty space. The cluster will be created with the average pitch of the detected audio in that range.</li>
+      </ul>
+
+      <h3>Fixing MIDI Warnings</h3>
+      <ul>
+        <li><strong>Ctrl + Click a warning box</strong> — Auto-fix the MIDI mismatch or create a missing cluster.</li>
       </ul>
 
       <h3>Deleting Clusters</h3>
       <ul>
-        <li><strong>Delete / Backspace</strong> — Remove selected cluster(s) and restore original audio.</li>
+        <li><strong>Delete / Backspace</strong> — Remove selected cluster(s) and restore the original unprocessed audio in that region.</li>
       </ul>
 
       <h3>Navigation</h3>
       <ul>
-        <li><strong>Scroll</strong> — Zoom time axis (centered on playhead).</li>
-        <li><strong>Shift + Scroll</strong> — Zoom frequency axis.</li>
-        <li><strong>Ctrl + Shift + Drag</strong> — Pan the view.</li>
+        <li><strong>Scroll wheel</strong> — Zoom the time axis in/out (centered on the playhead position).</li>
+        <li><strong>Shift + Scroll wheel</strong> — Zoom the frequency (pitch) axis in/out.</li>
+        <li><strong>Ctrl + Shift + Drag on empty space</strong> — Pan the view freely in both time and pitch directions.</li>
       </ul>
 
       <hr>
 
-      <h2>Time Tab</h2>
-      <p>Switch to the <strong>Time</strong> tab to adjust note timing. Drag clusters left/right to shift their position in time, or resize them to stretch/compress. Click <strong>Update Audio</strong> to render timing changes. Both pitch and time edits are combined when rendering.</p>
+      <h2>Correction Parameters</h2>
+      <p>These control how auto-correction calculates pitch shifts. Changes take effect when you click <strong>Correct</strong>.</p>
+      <table>
+        <thead><tr><th>Parameter</th><th>Description</th><th>Typical Value</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Transition ramp (ms)</strong></td>
+            <td>Default ramp in/out duration for new corrections. Ramps fade the pitch correction in/out at cluster edges to avoid abrupt jumps. Short ramps give a tighter, more "auto-tuned" character. Long ramps sound more natural and gradual, preserving the original feel of the performance.</td>
+            <td>50 ms (tight/robotic: 10-20, natural: 80-150)</td>
+          </tr>
+          <tr>
+            <td><strong>Gap threshold (ms)</strong></td>
+            <td>Gaps between clusters shorter than this will have their ramps blended together for smooth transitions. Increase if you hear audible pitch jumps between closely spaced notes.</td>
+            <td>150 ms</td>
+          </tr>
+          <tr>
+            <td><strong>Correction strength (%)</strong></td>
+            <td>How much of the calculated correction to apply. 100% snaps fully to the target note (hard-tune effect). Lower values leave some natural pitch variation, which sounds more human. Applies to auto-correct only; manual drags always set the exact shift.</td>
+            <td>90% (subtle/natural: 50-70, pop: 80-90, hard-tune: 100)</td>
+          </tr>
+          <tr>
+            <td><strong>MIDI threshold (cents)</strong></td>
+            <td>When MIDI is loaded, clusters within this distance of a MIDI note snap to it instead of the nearest chromatic note. Larger values match more loosely, which helps when the singer is significantly off-pitch from the intended melody.</td>
+            <td>80 cents (strict: 50, loose: 150)</td>
+          </tr>
+          <tr>
+            <td><strong>Auto smooth (%)</strong></td>
+            <td>Smoothing applied to all clusters during auto-correct. Smoothing flattens pitch variation (vibrato, wobble) within each cluster. 0% preserves natural vibrato entirely. Higher values progressively flatten pitch toward a straight line. 100% makes each note completely flat, which can sound robotic on long notes.</td>
+            <td>0% (natural vibrato), 20-40% (gentle control), 60-80% (pop), 100% (robotic/electronic)</td>
+          </tr>
+          <tr>
+            <td><strong>Smooth threshold (cents)</strong></td>
+            <td>Only apply auto-smoothing to clusters with pitch variation exceeding this threshold. Useful for selectively smoothing only wobbly/unstable notes while leaving intentional vibrato untouched. Set to 0 to smooth everything.</td>
+            <td>0 (smooth all), 30-50 (only unstable notes)</td>
+          </tr>
+          <tr>
+            <td><strong>Smooth threshold (ms)</strong></td>
+            <td>Only apply auto-smoothing to clusters longer than this duration. Short notes rarely need smoothing, so this lets you focus smoothing on longer sustained notes where pitch drift is most noticeable.</td>
+            <td>0 (smooth all), 800-1000 (only long sustained notes)</td>
+          </tr>
+          <tr>
+            <td><strong>Smooth curve</strong></td>
+            <td>Controls how aggressively the pitch curve is straightened. A value of 1.0 gives a gentle linear interpolation toward the target pitch. Higher values (2.0-3.0) produce more aggressive flattening that kicks in faster.</td>
+            <td>1.0 (gentle), 2.0-3.0 (aggressive)</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Per-Note Parameters (Selected Note Panel)</h3>
+      <p>These are set per cluster (or multi-selection) and override global defaults. Changes apply on mouse release.</p>
+      <table>
+        <thead><tr><th>Parameter</th><th>Description</th><th>Typical Value</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Ramp in / out (ms)</strong></td>
+            <td>Fade-in/out duration for this cluster's pitch correction. Short ramps give a tighter, more "auto-tuned" sound where the correction snaps in immediately. Long ramps give a more gradual, natural transition — the original pitch bends smoothly into the corrected pitch.</td>
+            <td>50 ms (tight: 10-20, natural: 80-150)</td>
+          </tr>
+          <tr>
+            <td><strong>Smoothing (%)</strong></td>
+            <td>How much pitch variation within this cluster is flattened. At 0%, all natural vibrato and pitch movement is preserved. At 50%, the pitch curve is pulled halfway toward a flat line. At 100%, the note is completely flat — useful for electronic/robotic effects but can sound unnatural on acoustic vocals.</td>
+            <td>0% (natural vibrato), 30-60% (controlled), 100% (flat/robotic)</td>
+          </tr>
+        </tbody>
+      </table>
 
       <hr>
 
@@ -101,9 +169,50 @@
 
       <hr>
 
-      <h2>Parameters Reference</h2>
+      <h2>Display Toggles</h2>
+      <table>
+        <thead><tr><th>Toggle</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>MIDI</strong></td>
+            <td>Show/hide MIDI reference notes on the pitch plot (green lines).</td>
+          </tr>
+          <tr>
+            <td><strong>Correction</strong></td>
+            <td>Show/hide the correction curve overlay (orange line showing pitch shift in cents over time).</td>
+          </tr>
+          <tr>
+            <td><strong>Simple / Advanced</strong></td>
+            <td>Toggle between simplified and advanced views. Advanced view shows analysis parameters, pitch engine settings, segment processing, time alignment tab, and the event log.</td>
+          </tr>
+        </tbody>
+      </table>
 
-      <h3>Analysis Parameters</h3>
+      <hr>
+
+      <h2>Mixer</h2>
+      <table>
+        <thead><tr><th>Control</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Main</strong></td>
+            <td>Volume of the processed vocal audio.</td>
+          </tr>
+          <tr>
+            <td><strong>Reference</strong></td>
+            <td>Volume of the reference vocal (loaded via the Reference button). Useful for A/B comparison.</td>
+          </tr>
+          <tr>
+            <td><strong>Backing</strong></td>
+            <td>Volume of the backing/instrumental track. Plays in sync with the vocal for context while editing.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      {#if $advancedView}
+      <hr>
+
+      <h2>Advanced: Analysis Parameters</h2>
       <p>These control how the pitch detection and note clustering works. Changes take effect on <strong>Re-analyze</strong>.</p>
       <table>
         <thead><tr><th>Parameter</th><th>Description</th><th>Typical Value</th></tr></thead>
@@ -146,73 +255,7 @@
         </tbody>
       </table>
 
-      <h3>Correction Parameters</h3>
-      <p>These control how auto-correction calculates pitch shifts. Changes take effect on <strong>Correct</strong>.</p>
-      <table>
-        <thead><tr><th>Parameter</th><th>Description</th><th>Typical Value</th></tr></thead>
-        <tbody>
-          <tr>
-            <td><strong>Transition ramp (ms)</strong></td>
-            <td>Default ramp in/out duration for new corrections. Ramps fade the pitch correction in/out at cluster edges to avoid abrupt jumps. Short ramps sound tighter; long ramps sound more natural.</td>
-            <td>50 ms (tight: 20, natural: 100)</td>
-          </tr>
-          <tr>
-            <td><strong>Gap threshold (ms)</strong></td>
-            <td>Gaps between clusters shorter than this will have their ramps blended together for smooth transitions.</td>
-            <td>150 ms</td>
-          </tr>
-          <tr>
-            <td><strong>Correction strength (%)</strong></td>
-            <td>How much of the calculated correction to apply. 100% snaps fully to the target note; lower values leave some natural pitch variation. Applies to auto-correct only.</td>
-            <td>90% (subtle: 50, hard tune: 100)</td>
-          </tr>
-          <tr>
-            <td><strong>MIDI threshold (cents)</strong></td>
-            <td>When MIDI is loaded, clusters within this distance of a MIDI note snap to it instead of the nearest chromatic note. Larger values match more loosely.</td>
-            <td>80 cents (strict: 50, loose: 150)</td>
-          </tr>
-          <tr>
-            <td><strong>Auto smooth (%)</strong></td>
-            <td>Smoothing applied to all clusters during auto-correct. Smoothing flattens pitch variation (vibrato, wobble) within each cluster. 0% preserves natural vibrato; 100% makes each note completely flat.</td>
-            <td>0% (natural), 30-50% (pop), 100% (robotic)</td>
-          </tr>
-          <tr>
-            <td><strong>Smooth threshold (cents)</strong></td>
-            <td>Only apply auto-smoothing to clusters with pitch variation exceeding this threshold. Use to selectively smooth only unstable notes while preserving intentional vibrato.</td>
-            <td>0 (apply to all), 30-50 (only wobbly notes)</td>
-          </tr>
-          <tr>
-            <td><strong>Smooth threshold (ms)</strong></td>
-            <td>Only apply auto-smoothing to clusters longer than this duration. Use to smooth only long, unstable notes while leaving shorter notes with their natural vibrato.</td>
-            <td>0 (apply to all), 800-1000 (only long notes)</td>
-          </tr>
-          <tr>
-            <td><strong>Smooth curve</strong></td>
-            <td>Controls how aggressively the pitch curve is straightened. Higher values produce more aggressive flattening. 1.0 is linear interpolation toward the target.</td>
-            <td>1.0 (gentle), 2.0-3.0 (aggressive)</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <h3>Per-Note Parameters (Selected Note Panel)</h3>
-      <p>These are set per cluster (or multi-selection) and override global defaults. Changes apply on mouse release.</p>
-      <table>
-        <thead><tr><th>Parameter</th><th>Description</th><th>Typical Value</th></tr></thead>
-        <tbody>
-          <tr>
-            <td><strong>Ramp in / out (ms)</strong></td>
-            <td>Fade-in/out duration for this cluster's pitch correction. Short ramps give a tighter, more "auto-tuned" sound. Long ramps give a more gradual, natural transition.</td>
-            <td>50 ms (tight: 10-20, natural: 80-150)</td>
-          </tr>
-          <tr>
-            <td><strong>Smoothing (%)</strong></td>
-            <td>How much pitch variation within this cluster is flattened. 0% keeps all natural vibrato. Higher values progressively remove wobble.</td>
-            <td>0% (natural), 30-60% (controlled), 100% (flat)</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <h3>Segment Processing Parameters (Selected Note Panel)</h3>
+      <h3>Segment Processing Parameters</h3>
       <p>These control how individual note corrections are rendered into the audio.</p>
       <table>
         <thead><tr><th>Parameter</th><th>Description</th><th>Typical Value</th></tr></thead>
@@ -433,7 +476,8 @@
         </tbody>
       </table>
 
-      <h3>Time Alignment Limits (Time Tab)</h3>
+      <h3>Time Alignment (Time Tab)</h3>
+      <p>Switch to the <strong>Time</strong> tab to adjust note timing. Drag clusters left/right to shift their position in time, or resize them to stretch/compress. Click <strong>Update Audio</strong> to render timing changes. Both pitch and time edits are combined when rendering.</p>
       <table>
         <thead><tr><th>Parameter</th><th>Description</th><th>Default</th></tr></thead>
         <tbody>
@@ -459,40 +503,7 @@
           </tr>
         </tbody>
       </table>
-
-      <h3>Mixer</h3>
-      <table>
-        <thead><tr><th>Control</th><th>Description</th></tr></thead>
-        <tbody>
-          <tr>
-            <td><strong>Main</strong></td>
-            <td>Volume of the processed vocal audio.</td>
-          </tr>
-          <tr>
-            <td><strong>Reference</strong></td>
-            <td>Volume of the reference vocal (loaded via the Reference button). Useful for A/B comparison.</td>
-          </tr>
-          <tr>
-            <td><strong>Backing</strong></td>
-            <td>Volume of the backing/instrumental track. Plays in sync with the vocal for context while editing.</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <h3>Display Toggles</h3>
-      <table>
-        <thead><tr><th>Toggle</th><th>Description</th></tr></thead>
-        <tbody>
-          <tr>
-            <td><strong>MIDI</strong></td>
-            <td>Show/hide MIDI reference notes on the pitch plot (green lines).</td>
-          </tr>
-          <tr>
-            <td><strong>Correction</strong></td>
-            <td>Show/hide the correction curve overlay (orange line showing pitch shift in cents over time).</td>
-          </tr>
-        </tbody>
-      </table>
+      {/if}
 
     </div>
   </div>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { selectedCluster, selectedIdx, selectedIndices, clusters, dirtyClusters, midiWarnings, midiLoaded } from '$lib/stores/appState';
+  import { selectedCluster, selectedIdx, selectedIndices, clusters, dirtyClusters, midiWarnings, midiLoaded, advancedView } from '$lib/stores/appState';
   import { params } from '$lib/stores/params';
   import type { Cluster } from '$lib/utils/types';
 
@@ -141,6 +141,7 @@
         </div>
       </div>
 
+      {#if $advancedView}
       <div style="margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px;">
         <div style="font-size:0.75rem; color:var(--accent2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;">Segment processing</div>
       </div>
@@ -191,6 +192,7 @@
       >
         {processingSegment ? 'Processing...' : 'Process Segment'}
       </button>
+      {/if}
     {:else}
       {#if $midiWarnings.length > 0}
         <div style="font-size:0.75rem; color:var(--accent2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;">

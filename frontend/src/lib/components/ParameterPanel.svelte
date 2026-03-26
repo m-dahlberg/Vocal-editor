@@ -1,6 +1,7 @@
 <script lang="ts">
   import { params } from '$lib/stores/params';
-  import { avgPitchDeviation, timeEdits } from '$lib/stores/appState';
+  import { avgPitchDeviation, timeEdits, advancedView } from '$lib/stores/appState';
+  import presets from '$lib/presets.json';
 
   interface Props {
     onAnalyze: () => void;
@@ -11,11 +12,35 @@
   let { onAnalyze, onCorrect, onExport }: Props = $props();
 
   const timeEditCount = $derived($timeEdits.length);
+  let selectedPreset = $state('');
+
+  function applyPreset(name: string) {
+    const preset = presets.find((p) => p.name === name);
+    if (!preset) return;
+    params.update((p) => {
+      const { name: _, ...values } = preset;
+      return { ...p, ...values };
+    });
+  }
 </script>
 
 <aside class="param-panel">
   <h2>Parameters</h2>
 
+  <section>
+    <div class="param-group">
+      <label>Preset
+        <select bind:value={selectedPreset} onchange={() => applyPreset(selectedPreset)}>
+          <option value="" disabled>Select preset...</option>
+          {#each presets as preset}
+            <option value={preset.name}>{preset.name}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
+  </section>
+
+  {#if $advancedView}
   <section>
     <h3>Analysis</h3>
     <div class="param-group">
@@ -31,6 +56,13 @@
       <label>Avg pitch deviation (cents)<span style="float:right; color:var(--accent2);">{$avgPitchDeviation != null ? $avgPitchDeviation.toFixed(1) : '—'}</span></label>
     </div>
   </section>
+  {:else}
+  <section>
+    <div class="param-group">
+      <label>Avg pitch deviation (cents)<span style="float:right; color:var(--accent2);">{$avgPitchDeviation != null ? $avgPitchDeviation.toFixed(1) : '—'}</span></label>
+    </div>
+  </section>
+  {/if}
 
   <section>
     <h3>Correction</h3>
@@ -46,6 +78,7 @@
     </div>
   </section>
 
+  {#if $advancedView}
   <section>
     <h3>Pitch Engine</h3>
     <div class="param-group">
@@ -185,6 +218,7 @@
       </label>
     </div>
   </section>
+  {/if}
   {/if}
 
   {#if timeEditCount > 0}

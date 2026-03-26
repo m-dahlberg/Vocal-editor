@@ -1,0 +1,46 @@
+[
+  {
+    "name": "Default",
+    "transition_ramp_ms": 100,
+    "gap_threshold_ms": 150,
+    "correction_strength": 90,
+    "midi_threshold_cents": 80,
+    "autocorrect_smoothing": 0,
+    "smoothing_threshold_cents": 0,
+    "smoothing_threshold_ms": 0,
+    "smooth_curve": 1.0
+  },
+  {
+    "name": "Strict",
+    "transition_ramp_ms": 100,
+    "gap_threshold_ms": 150,
+    "correction_strength": 100,
+    "midi_threshold_cents": 120,
+    "autocorrect_smoothing": 0,
+    "smoothing_threshold_cents": 0,
+    "smoothing_threshold_ms": 0,
+    "smooth_curve": 1.0
+  },
+  {
+    "name": "Strict + Light smoothing",
+    "transition_ramp_ms": 100,
+    "gap_threshold_ms": 150,
+    "correction_strength": 100,
+    "midi_threshold_cents": 120,
+    "autocorrect_smoothing": 30,
+    "smoothing_threshold_cents": 10,
+    "smoothing_threshold_ms": 250,
+    "smooth_curve": 1.0
+  },
+  {
+    "name": "Strict + Heavy smoothing",
+    "transition_ramp_ms": 100,
+    "gap_threshold_ms": 150,
+    "correction_strength": 100,
+    "midi_threshold_cents": 120,
+    "autocorrect_smoothing": 60,
+    "smoothing_threshold_cents": 0,
+    "smoothing_threshold_ms": 0,
+    "smooth_curve": 1.0
+  }
+]
