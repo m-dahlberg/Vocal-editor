@@ -12,6 +12,7 @@ export const midiWarnings = writable<MidiWarning[]>([]);
 
 // Reference audio
 export const referenceClusters = writable<Cluster[]>([]);
+export const referenceStretchMarkers = writable<StretchMarker[]>([]);
 export const referenceLoaded = writable(false);
 
 // Backing track

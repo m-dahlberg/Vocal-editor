@@ -29,7 +29,7 @@ def save_as_wav(uploaded_file, wav_path):
 from audio_engine import (
     analyze_pitch, cluster_notes, parse_midi_file, piano_to_midi_notes, midi_notes_to_file,
     autocorrect_midi, autocorrect_standard,
-    process_full_audio, process_segment,
+    process_full_audio, process_segment, process_time_segment,
     clusters_to_json, get_audio_mono, hz_to_note,
     compute_avg_pitch_deviation, compute_cluster_pitch_variation,
     generate_pitch_map,
@@ -740,6 +740,126 @@ def correct_cluster():
             'frequencies': seg_freqs,
             'start_time': seg_start_time,
             'end_time': seg_end_time,
+        })
+
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+@app.route('/api/process_time_segment', methods=['POST'])
+def api_process_time_segment():
+    """Process a segment around a moved stretch marker and splice into corrected audio.
+
+    The dirty region spans from the previous marker to the next marker
+    (plus padding), ensuring boundaries match unchanged audio for seamless splicing.
+    """
+    data = request.json or {}
+    marker_idx = data.get('marker_idx')
+
+    if marker_idx is None:
+        return jsonify({'error': 'marker_idx is required'}), 400
+
+    # Sync clusters if provided
+    incoming = data.get('clusters', [])
+    if incoming:
+        times = SESSION['times']
+        frequencies = SESSION['frequencies']
+        params = SESSION['params']
+        transition_ramp = params.get('transition_ramp_ms', 160)
+        correction_strength = params.get('correction_strength', 90)
+
+        new_clusters = []
+        for c in incoming:
+            start_time = float(c['start_time'])
+            end_time   = float(c['end_time'])
+
+            i_start = np.searchsorted(times, start_time, side='left')
+            i_end = np.searchsorted(times, end_time, side='right')
+            cluster_times = []
+            cluster_freqs = []
+            for j in range(i_start, i_end):
+                f = frequencies[j]
+                if not np.isnan(f) and f > 0:
+                    cluster_times.append(float(times[j]))
+                    cluster_freqs.append(float(f))
+
+            mean_freq = float(c.get('mean_freq', 0))
+            if mean_freq == 0 and cluster_freqs:
+                mean_freq = float(np.mean(cluster_freqs))
+
+            note = hz_to_note(mean_freq) or c.get('note', 'A4')
+
+            new_clusters.append({
+                'note': note,
+                'start_time': start_time,
+                'end_time': end_time,
+                'mean_freq': mean_freq,
+                'duration_ms': (end_time - start_time) * 1000,
+                'pitch_shift_semitones': float(c.get('pitch_shift_semitones', 0)),
+                'ramp_in_ms': float(c.get('ramp_in_ms', transition_ramp)),
+                'ramp_out_ms': float(c.get('ramp_out_ms', transition_ramp)),
+                'correction_strength': float(c.get('correction_strength', correction_strength)),
+                'smoothing_percent': float(c.get('smoothing_percent', 0)),
+                'manually_edited': bool(c.get('manually_edited', False)),
+                'times': cluster_times,
+                'frequencies': cluster_freqs,
+            })
+            new_clusters[-1]['pitch_variation_cents'] = compute_cluster_pitch_variation(new_clusters[-1])
+
+        SESSION['clusters'] = new_clusters
+
+    # Sync stretch markers
+    incoming_markers = data.get('stretch_markers', [])
+    if incoming_markers:
+        SESSION['stretch_markers'] = [
+            {
+                'id': m['id'],
+                'originalTime': float(m['originalTime']),
+                'currentTime': float(m['currentTime']),
+                'leftClusterIdx': int(m['leftClusterIdx']),
+                'rightClusterIdx': int(m['rightClusterIdx']),
+            }
+            for m in incoming_markers
+        ]
+
+    markers = SESSION.get('stretch_markers', [])
+    if marker_idx >= len(markers):
+        return jsonify({'error': f'Invalid marker_idx {marker_idx}, have {len(markers)} markers'}), 400
+
+    padding_ms = float(data.get('padding_ms', 100))
+    crossfade_ms = float(data.get('crossfade_ms', 10))
+    crop_ms = float(data.get('crop_ms', 50))
+
+    # Pass Parselmouth f0 data for engines that need it
+    engine = SESSION['params'].get('pitch_engine', 'rubberband')
+    if engine in ('psola', 'fd_psola', 'sms'):
+        engine_key = engine if engine != 'sms' else 'sms'
+        if SESSION.get('times') is not None and SESSION.get('frequencies') is not None:
+            if engine_key in SESSION['params']:
+                SESSION['params'][engine_key]['_parselmouth_f0'] = {
+                    'times': SESSION['times'],
+                    'frequencies': SESSION['frequencies'],
+                }
+
+    try:
+        result_audio, msg = process_time_segment(
+            SESSION['audio'], SESSION['sr'],
+            SESSION['clusters'], markers, marker_idx,
+            SESSION['params'], SESSION['corrected_path'],
+            stretch_markers_raw=markers,
+            padding_ms=padding_ms, crossfade_ms=crossfade_ms,
+            crop_ms=crop_ms
+        )
+
+        if result_audio is None:
+            return jsonify({'error': msg}), 500
+
+        SESSION['corrected_audio'] = result_audio
+        sf.write(SESSION['corrected_path'], result_audio, int(SESSION['sr']))
+
+        return jsonify({
+            'ok': True,
         })
 
     except Exception as e:

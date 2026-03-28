@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import {
     clusters, selectedIdx, selectedIndices, stretchMarkers, dirtyStretchMarkers,
-    referenceClusters, midiNotes, showCorrectionCurve, backendTimemap,
+    referenceClusters, referenceStretchMarkers, referenceLoaded,
+    midiNotes, showCorrectionCurve, backendTimemap,
     activeTab, viewXRange, waveformReset
   } from '$lib/stores/appState';
   import { params } from '$lib/stores/params';
@@ -14,7 +15,7 @@
     onDrawBox: (start: number, end: number) => void;
     syncWaveform: (xRange: [number, number], totalDuration: number) => void;
     onSeek?: (time: number) => void;
-    onEditComplete?: () => void;
+    onEditComplete?: (markerIdx: number) => void;
   }
 
   let { onClusterSelect, onDrawBox, syncWaveform, onSeek, onEditComplete }: Props = $props();
@@ -45,61 +46,129 @@
     playhead: '#e94560',
     text: '#ccc',
     textDim: '#888',
-    refBox: 'rgba(76,175,80,0.25)',
-    refBoxEdge: '#4CAF50',
-    refText: '#a5d6a7',
     midiLine: '#ab47bc',
     midiText: '#ce93d8',
     timeCurveLine: '#f0c040',
     timeCurveFill: 'rgba(240,192,64,0.15)',
     timeCurveBaseline: 'rgba(240,192,64,0.3)',
+    // Main audio markers
     markerDefault: '#888',
     markerMoved: '#2dd4bf',
     markerGhost: 'rgba(45,212,191,0.35)',
-    markerHandle: '#fff',
     noteRegion: 'rgba(255,140,66,0.10)',
     noteRegionEdge: 'rgba(255,140,66,0.25)',
+    // Reference markers
+    refMarker: '#4CAF50',
+    refNoteRegion: 'rgba(76,175,80,0.10)',
+    refNoteRegionEdge: 'rgba(76,175,80,0.25)',
+    refNoteLabel: '#a5d6a7',
+    // Split divider
+    splitLine: '#3a3a5a',
+    splitLabel: '#666',
   };
 
   const MARGIN = { l: 60, r: 60, t: 30, b: 50 };
-  const MARKER_HANDLE_SIZE = 8;
+  const MARKER_HANDLE_SIZE = 7;
   const MARKER_HIT_THRESHOLD = 10;
-  const REF_BOX_HEIGHT = 30;
-  const REF_BOX_Y_CENTER = 0.20;
   const MIDI_LINE_HEIGHT = 3;
-  const MIDI_ROW_TOP = 0.70;
-  const NOTE_LABEL_Y = 0.38;
-  const TIME_CURVE_TOP = 0.06;
-  const TIME_CURVE_HEIGHT = 0.14;
+  const TIME_CURVE_TOP_FRAC = 0.06;
+  const TIME_CURVE_HEIGHT_FRAC = 0.12;
 
   // --- Marker generation ---
 
-  function generateMarkersFromClusters(cls: Cluster[]): StretchMarker[] {
+  function generateMarkersFromClusters(cls: Cluster[], prefix: string): StretchMarker[] {
     const markers: StretchMarker[] = [];
+    const padding = $params.cluster_padding_ms / 1000;
+
+    if (cls.length === 0) return markers;
+
+    // Edge marker before first cluster (if there's enough space)
+    if (cls[0].start_time >= padding) {
+      markers.push({
+        id: `${prefix}-pre-0`,
+        originalTime: cls[0].start_time - padding,
+        currentTime: cls[0].start_time - padding,
+        leftClusterIdx: -1,
+        rightClusterIdx: 0,
+      });
+    }
+
+    // Gap markers between consecutive clusters
     for (let i = 0; i < cls.length - 1; i++) {
       const gapStart = cls[i].end_time;
       const gapEnd = cls[i + 1].start_time;
-      const midpoint = gapStart >= gapEnd
-        ? gapStart  // contiguous: marker at boundary
-        : (gapStart + gapEnd) / 2;  // gap: marker at midpoint
-      markers.push({
-        id: `gap-${i}-${i + 1}`,
-        originalTime: midpoint,
-        currentTime: midpoint,
-        leftClusterIdx: i,
-        rightClusterIdx: i + 1,
-      });
+      const gapDuration = gapEnd - gapStart;
+
+      if (gapDuration > padding * 2) {
+        // Long pause: place post-cluster and pre-cluster markers
+        markers.push({
+          id: `${prefix}-${i}-post`,
+          originalTime: gapStart + padding,
+          currentTime: gapStart + padding,
+          leftClusterIdx: i,
+          rightClusterIdx: i + 1,
+        });
+        markers.push({
+          id: `${prefix}-${i + 1}-pre`,
+          originalTime: gapEnd - padding,
+          currentTime: gapEnd - padding,
+          leftClusterIdx: i,
+          rightClusterIdx: i + 1,
+        });
+      } else {
+        // Short gap: single midpoint marker
+        const midpoint = gapStart >= gapEnd ? gapStart : (gapStart + gapEnd) / 2;
+        markers.push({
+          id: `${prefix}-${i}-${i + 1}`,
+          originalTime: midpoint,
+          currentTime: midpoint,
+          leftClusterIdx: i,
+          rightClusterIdx: i + 1,
+        });
+      }
     }
+
+    // Edge marker after last cluster
+    const lastEnd = cls[cls.length - 1].end_time;
+    markers.push({
+      id: `${prefix}-post-${cls.length - 1}`,
+      originalTime: lastEnd + padding,
+      currentTime: lastEnd + padding,
+      leftClusterIdx: cls.length - 1,
+      rightClusterIdx: cls.length,
+    });
+
     return markers;
   }
 
-  // Auto-generate markers when clusters change and no markers exist
+  // Auto-generate main markers when clusters change and no markers exist
   $effect(() => {
     const cls = $clusters;
-    if (cls.length > 1 && $stretchMarkers.length === 0) {
-      $stretchMarkers = generateMarkersFromClusters(cls);
+    if (cls.length > 0 && $stretchMarkers.length === 0) {
+      $stretchMarkers = generateMarkersFromClusters(cls, 'gap');
     }
   });
+
+  // Auto-generate reference markers when reference clusters change
+  $effect(() => {
+    const refCls = $referenceClusters;
+    if (refCls.length > 0) {
+      $referenceStretchMarkers = generateMarkersFromClusters(refCls, 'ref');
+    } else {
+      $referenceStretchMarkers = [];
+    }
+  });
+
+  // --- Layout helpers ---
+
+  /** Whether to show split view (reference loaded) */
+  let hasRef = $derived($referenceClusters.length > 0);
+
+  /** Get the pixel boundary between reference (top) and main (bottom) halves */
+  function getSplitY(h: number): number {
+    const plotH = h - MARGIN.t - MARGIN.b;
+    return MARGIN.t + plotH * 0.5;
+  }
 
   // --- Drawing ---
 
@@ -111,6 +180,117 @@
   function pxToTime(px: number): number {
     const w = canvasEl.width / window.devicePixelRatio - MARGIN.l - MARGIN.r;
     return _xRange[0] + ((px - MARGIN.l) / w) * (_xRange[1] - _xRange[0]);
+  }
+
+  /** Draw note regions, labels, and markers for a set of clusters/markers within a vertical band */
+  function drawHalf(
+    cls: Cluster[],
+    markers: StretchMarker[],
+    yTop: number,
+    yBot: number,
+    w: number,
+    isRef: boolean,
+  ) {
+    const halfH = yBot - yTop;
+    const regionColor = isRef ? COLORS.refNoteRegion : COLORS.noteRegion;
+    const regionEdge = isRef ? COLORS.refNoteRegionEdge : COLORS.noteRegionEdge;
+    const labelColor = isRef ? COLORS.refNoteLabel : COLORS.noteLabel;
+    const markerColor = isRef ? COLORS.refMarker : COLORS.markerDefault;
+
+    // Note region backgrounds
+    for (let i = 0; i < cls.length; i++) {
+      const x0 = timeToPx(cls[i].start_time);
+      const x1 = timeToPx(cls[i].end_time);
+      if (x1 < MARGIN.l || x0 > w - MARGIN.r) continue;
+
+      ctx.fillStyle = regionColor;
+      ctx.fillRect(x0, yTop, x1 - x0, halfH);
+      ctx.strokeStyle = regionEdge;
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(x0, yTop, x1 - x0, halfH);
+    }
+
+    // Note labels
+    const labelY = yTop + halfH * 0.4;
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < cls.length; i++) {
+      const x0 = timeToPx(cls[i].start_time);
+      const x1 = timeToPx(cls[i].end_time);
+      if (x1 < MARGIN.l || x0 > w - MARGIN.r) continue;
+      if (x1 - x0 > 18) {
+        ctx.fillStyle = labelColor;
+        ctx.fillText(`${i + 1}:${cls[i].note}`, (x0 + x1) / 2, labelY);
+      }
+    }
+
+    // Markers
+    for (const marker of markers) {
+      const isMoved = !isRef && Math.abs(marker.currentTime - marker.originalTime) > 0.0001;
+      const x = timeToPx(marker.currentTime);
+      if (x < MARGIN.l || x > w - MARGIN.r) continue;
+
+      // Ghost line (moved main markers only)
+      if (isMoved) {
+        const origX = timeToPx(marker.originalTime);
+        if (origX >= MARGIN.l && origX <= w - MARGIN.r) {
+          ctx.strokeStyle = COLORS.markerGhost;
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(origX, yTop);
+          ctx.lineTo(origX, yBot);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
+      // Main line
+      ctx.strokeStyle = isMoved ? COLORS.markerMoved : markerColor;
+      ctx.lineWidth = isMoved ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(x, yTop);
+      ctx.lineTo(x, yBot);
+      ctx.stroke();
+
+      // Diamond handle
+      const cy = yTop + halfH * 0.5;
+      const s = MARKER_HANDLE_SIZE;
+      ctx.fillStyle = isMoved ? COLORS.markerMoved : markerColor;
+      ctx.beginPath();
+      ctx.moveTo(x, cy - s);
+      ctx.lineTo(x + s, cy);
+      ctx.lineTo(x, cy + s);
+      ctx.lineTo(x - s, cy);
+      ctx.closePath();
+      ctx.fill();
+
+      // Delta label (moved main markers only)
+      if (isMoved) {
+        const deltaMs = (marker.currentTime - marker.originalTime) * 1000;
+        const label = `${deltaMs > 0 ? '+' : ''}${deltaMs.toFixed(0)}ms`;
+        ctx.fillStyle = COLORS.markerMoved;
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(label, x, yTop - 2);
+      }
+
+      // Side note labels
+      if (marker.leftClusterIdx >= 0 && marker.leftClusterIdx < cls.length &&
+          marker.rightClusterIdx >= 0 && marker.rightClusterIdx < cls.length) {
+        const leftNote = cls[marker.leftClusterIdx].note;
+        const rightNote = cls[marker.rightClusterIdx].note;
+        ctx.fillStyle = COLORS.textDim;
+        ctx.font = '8px sans-serif';
+        ctx.textBaseline = 'top';
+        ctx.textAlign = 'right';
+        ctx.fillText(leftNote, x - 4, yBot + 1);
+        ctx.textAlign = 'left';
+        ctx.fillText(rightNote, x + 4, yBot + 1);
+      }
+    }
   }
 
   function draw() {
@@ -125,7 +305,6 @@
     canvasEl.style.height = h + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    const plotW = w - MARGIN.l - MARGIN.r;
     const plotH = h - MARGIN.t - MARGIN.b;
 
     // Background
@@ -158,290 +337,124 @@
       ctx.fillText(t.toFixed(step < 1 ? 1 : 0) + 's', x, h - MARGIN.b + 14);
     }
 
-    // Note region backgrounds (subtle shading to show where clusters are)
     const cls = $clusters;
-    for (let i = 0; i < cls.length; i++) {
-      const x0 = timeToPx(cls[i].start_time);
-      const x1 = timeToPx(cls[i].end_time);
-      if (x1 < MARGIN.l || x0 > w - MARGIN.r) continue;
-
-      ctx.fillStyle = COLORS.noteRegion;
-      ctx.fillRect(x0, MARGIN.t, x1 - x0, plotH);
-      ctx.strokeStyle = COLORS.noteRegionEdge;
-      ctx.lineWidth = 0.5;
-      ctx.strokeRect(x0, MARGIN.t, x1 - x0, plotH);
-    }
-
-    // Note labels (small text near top)
-    const labelY = MARGIN.t + plotH * NOTE_LABEL_Y;
-    ctx.font = '10px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    for (let i = 0; i < cls.length; i++) {
-      const x0 = timeToPx(cls[i].start_time);
-      const x1 = timeToPx(cls[i].end_time);
-      if (x1 < MARGIN.l || x0 > w - MARGIN.r) continue;
-      const boxW = x1 - x0;
-      if (boxW > 18) {
-        ctx.fillStyle = COLORS.noteLabel;
-        ctx.fillText(`${i + 1}:${cls[i].note}`, (x0 + x1) / 2, labelY);
-      }
-    }
-
-    // Reference boxes
     const refCls = $referenceClusters;
-    if (refCls.length > 0) {
-      const refBoxY = MARGIN.t + plotH * REF_BOX_Y_CENTER - REF_BOX_HEIGHT / 2;
-      for (let i = 0; i < refCls.length; i++) {
-        const rc = refCls[i];
-        const x0 = timeToPx(rc.start_time);
-        const x1 = timeToPx(rc.end_time);
-        if (x1 < MARGIN.l || x0 > w - MARGIN.r) continue;
+    const showSplit = refCls.length > 0;
 
-        ctx.fillStyle = COLORS.refBox;
-        ctx.fillRect(x0, refBoxY, x1 - x0, REF_BOX_HEIGHT);
-        ctx.strokeStyle = COLORS.refBoxEdge;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x0, refBoxY, x1 - x0, REF_BOX_HEIGHT);
+    if (showSplit) {
+      // ---- SPLIT VIEW ----
+      const splitY = getSplitY(h);
+      const refTop = MARGIN.t;
+      const refBot = splitY - 8;  // gap for split line
+      const mainTop = splitY + 8;
+      const mainBot = h - MARGIN.b;
 
-        if (x1 - x0 > 20) {
-          ctx.fillStyle = COLORS.refText;
-          ctx.font = '10px sans-serif';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(`${i + 1}:${rc.note}`, (x0 + x1) / 2, refBoxY + REF_BOX_HEIGHT / 2);
-        }
-      }
-    }
+      // Draw reference half (top)
+      drawHalf(refCls, $referenceStretchMarkers, refTop, refBot, w, true);
 
-    // MIDI reference pitch lines
-    const midiData = $midiNotes;
-    if (midiData.length > 0) {
-      const midiFreqs = midiData.map(n => n.frequency);
-      const minFreq = Math.min(...midiFreqs);
-      const maxFreq = Math.max(...midiFreqs);
-      const midiRowTop = MARGIN.t + plotH * MIDI_ROW_TOP;
-      const midiRowHeight = plotH * 0.25;
+      // Draw main half (bottom)
+      drawHalf(cls, $stretchMarkers, mainTop, mainBot, w, false);
 
-      const freqRange = maxFreq - minFreq;
-      const freqToY = (freq: number): number => {
-        if (freqRange < 1) return midiRowTop + midiRowHeight / 2;
-        const ratio = (freq - minFreq) / freqRange;
-        return midiRowTop + midiRowHeight - ratio * midiRowHeight;
-      };
-
-      ctx.fillStyle = COLORS.textDim;
-      ctx.font = '10px sans-serif';
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'top';
-      ctx.fillText('MIDI', MARGIN.l - 6, midiRowTop);
-
-      for (let i = 0; i < midiData.length; i++) {
-        const mn = midiData[i];
-        const x0 = timeToPx(mn.start_time);
-        const x1 = timeToPx(mn.end_time);
-        if (x1 < MARGIN.l || x0 > w - MARGIN.r) continue;
-
-        const y = freqToY(mn.frequency);
-        ctx.strokeStyle = COLORS.midiLine;
-        ctx.lineWidth = MIDI_LINE_HEIGHT;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(Math.max(x0, MARGIN.l), y);
-        ctx.lineTo(Math.min(x1, w - MARGIN.r), y);
-        ctx.stroke();
-
-        if (x1 - x0 > 18) {
-          ctx.fillStyle = COLORS.midiText;
-          ctx.font = '9px sans-serif';
-          ctx.textAlign = 'left';
-          ctx.textBaseline = 'bottom';
-          ctx.fillText(mn.note_name, Math.max(x0, MARGIN.l) + 2, y - 3);
-        }
-      }
-    }
-
-    // --- Stretch Markers ---
-    const markers = $stretchMarkers;
-    for (const marker of markers) {
-      const isMoved = Math.abs(marker.currentTime - marker.originalTime) > 0.0001;
-      const x = timeToPx(marker.currentTime);
-
-      if (x < MARGIN.l || x > w - MARGIN.r) continue;
-
-      // Ghost line at original position (if moved)
-      if (isMoved) {
-        const origX = timeToPx(marker.originalTime);
-        if (origX >= MARGIN.l && origX <= w - MARGIN.r) {
-          ctx.strokeStyle = COLORS.markerGhost;
-          ctx.lineWidth = 1;
-          ctx.setLineDash([4, 4]);
-          ctx.beginPath();
-          ctx.moveTo(origX, MARGIN.t);
-          ctx.lineTo(origX, h - MARGIN.b);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
-      }
-
-      // Main marker line
-      ctx.strokeStyle = isMoved ? COLORS.markerMoved : COLORS.markerDefault;
-      ctx.lineWidth = isMoved ? 2 : 1;
-      ctx.beginPath();
-      ctx.moveTo(x, MARGIN.t);
-      ctx.lineTo(x, h - MARGIN.b);
-      ctx.stroke();
-
-      // Diamond handle at center
-      const cy = MARGIN.t + plotH * 0.5;
-      const s = MARKER_HANDLE_SIZE;
-      ctx.fillStyle = isMoved ? COLORS.markerMoved : COLORS.markerDefault;
-      ctx.beginPath();
-      ctx.moveTo(x, cy - s);
-      ctx.lineTo(x + s, cy);
-      ctx.lineTo(x, cy + s);
-      ctx.lineTo(x - s, cy);
-      ctx.closePath();
-      ctx.fill();
-
-      // Delta label (if moved)
-      if (isMoved) {
-        const deltaMs = (marker.currentTime - marker.originalTime) * 1000;
-        const label = `${deltaMs > 0 ? '+' : ''}${deltaMs.toFixed(0)}ms`;
-        ctx.fillStyle = COLORS.markerMoved;
-        ctx.font = '9px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'bottom';
-        ctx.fillText(label, x, MARGIN.t - 2);
-      }
-
-      // Note labels on either side of the marker
-      if (marker.leftClusterIdx >= 0 && marker.leftClusterIdx < cls.length &&
-          marker.rightClusterIdx >= 0 && marker.rightClusterIdx < cls.length) {
-        const leftNote = cls[marker.leftClusterIdx].note;
-        const rightNote = cls[marker.rightClusterIdx].note;
-        ctx.fillStyle = COLORS.textDim;
-        ctx.font = '8px sans-serif';
-        ctx.textBaseline = 'top';
-        ctx.textAlign = 'right';
-        ctx.fillText(leftNote, x - 4, h - MARGIN.b + 2);
-        ctx.textAlign = 'left';
-        ctx.fillText(rightNote, x + 4, h - MARGIN.b + 2);
-      }
-    }
-
-    // Time correction curve
-    if ($showCorrectionCurve && markers.length > 0) {
-      const curveTop = MARGIN.t + plotH * TIME_CURVE_TOP;
-      const curveH = plotH * TIME_CURVE_HEIGHT;
-      const baselineY = curveTop + curveH / 2;
-
-      // Build keypoints from stretch markers
-      let keypoints: { src: number; tgt: number }[];
-
-      if (!$dirtyStretchMarkers && $backendTimemap.length > 0) {
-        keypoints = $backendTimemap.map(e => ({ src: e.source_s, tgt: e.target_s }));
-      } else {
-        // Live preview from markers
-        const kpSet = new Map<number, number>();
-        kpSet.set(0, 0);
-
-        const movedMarkers = markers.filter(m => Math.abs(m.currentTime - m.originalTime) > 0.0001);
-        const movedAdjacentLeft = new Set<number>();
-        const movedAdjacentRight = new Set<number>();
-
-        for (const m of movedMarkers) {
-          kpSet.set(m.originalTime, m.currentTime);
-          movedAdjacentLeft.add(m.leftClusterIdx);
-          movedAdjacentRight.add(m.rightClusterIdx);
-        }
-
-        // Pin untouched cluster boundaries
-        for (let i = 0; i < cls.length; i++) {
-          // Check if start boundary is adjacent to a moved marker (as right cluster)
-          if (!movedAdjacentRight.has(i)) {
-            if (!kpSet.has(cls[i].start_time)) kpSet.set(cls[i].start_time, cls[i].start_time);
-          }
-          // Check if end boundary is adjacent to a moved marker (as left cluster)
-          if (!movedAdjacentLeft.has(i)) {
-            if (!kpSet.has(cls[i].end_time)) kpSet.set(cls[i].end_time, cls[i].end_time);
-          }
-        }
-
-        const lastEnd = cls.length > 0 ? cls[cls.length - 1].end_time + 1 : 1;
-        if (!kpSet.has(lastEnd)) kpSet.set(lastEnd, lastEnd);
-
-        keypoints = Array.from(kpSet.entries())
-          .map(([src, tgt]) => ({ src, tgt }))
-          .sort((a, b) => a.src - b.src);
-      }
-
-      // Compute log2 speed ratio
-      const MAX_DEV = 4;
-      type KpSegment = { tgtStart: number; tgtEnd: number; dev: number };
-      const kpSegments: KpSegment[] = [];
-      let maxDev = 0;
-
-      for (let i = 1; i < keypoints.length; i++) {
-        const srcDur = keypoints[i].src - keypoints[i - 1].src;
-        const tgtDur = keypoints[i].tgt - keypoints[i - 1].tgt;
-        let dev = 0;
-        if (srcDur > 0.001 && tgtDur > 0.001) {
-          dev = Math.log2(srcDur / tgtDur);
-        } else if (srcDur > 0.001 && tgtDur <= 0.001) {
-          dev = MAX_DEV;
-        } else if (srcDur <= 0.001 && tgtDur > 0.001) {
-          dev = -MAX_DEV;
-        }
-        dev = Math.max(-MAX_DEV, Math.min(MAX_DEV, dev));
-        kpSegments.push({ tgtStart: keypoints[i - 1].tgt, tgtEnd: keypoints[i].tgt, dev });
-        if (Math.abs(dev) > maxDev) maxDev = Math.abs(dev);
-      }
-
-      const scale = Math.max(maxDev * 1.3, 3.0);
-
-      // Baseline
-      ctx.strokeStyle = COLORS.timeCurveBaseline;
+      // Split line
+      ctx.strokeStyle = COLORS.splitLine;
       ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
+      ctx.setLineDash([6, 4]);
       ctx.beginPath();
-      ctx.moveTo(MARGIN.l, baselineY);
-      ctx.lineTo(w - MARGIN.r, baselineY);
+      ctx.moveTo(MARGIN.l, splitY);
+      ctx.lineTo(w - MARGIN.r, splitY);
       ctx.stroke();
       ctx.setLineDash([]);
 
-      ctx.fillStyle = COLORS.timeCurveLine;
+      // Labels
+      ctx.fillStyle = COLORS.splitLabel;
       ctx.font = '9px sans-serif';
       ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('Time', MARGIN.l - 6, baselineY);
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('REF', MARGIN.l - 6, splitY - 2);
+      ctx.textBaseline = 'top';
+      ctx.fillText('MAIN', MARGIN.l - 6, splitY + 2);
 
-      function drawCurvePath() {
-        ctx.beginPath();
-        ctx.moveTo(MARGIN.l, baselineY);
-        for (const seg of kpSegments) {
-          const devY = baselineY - (seg.dev / scale) * (curveH / 2);
-          const x0 = timeToPx(seg.tgtStart);
-          const x1 = timeToPx(seg.tgtEnd);
-          ctx.lineTo(x0, devY);
-          ctx.lineTo(x1, devY);
+      // MIDI note change lines (drawn across both halves for visual alignment reference)
+      const midiData = $midiNotes;
+      if (midiData.length > 1) {
+        ctx.strokeStyle = 'rgba(171,71,188,0.25)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 3]);
+        for (let i = 0; i < midiData.length - 1; i++) {
+          const boundary = midiData[i].end_time;
+          const x = timeToPx(boundary);
+          if (x < MARGIN.l || x > w - MARGIN.r) continue;
+          ctx.beginPath();
+          ctx.moveTo(x, MARGIN.t);
+          ctx.lineTo(x, h - MARGIN.b);
+          ctx.stroke();
         }
-        ctx.lineTo(w - MARGIN.r, baselineY);
+        ctx.setLineDash([]);
       }
 
-      drawCurvePath();
-      ctx.lineTo(w - MARGIN.r, baselineY);
-      ctx.closePath();
-      ctx.fillStyle = COLORS.timeCurveFill;
-      ctx.fill();
+      // Time correction curve in main half
+      if ($showCorrectionCurve && $stretchMarkers.length > 0) {
+        drawTimeCurve(cls, $stretchMarkers, mainTop, mainBot - mainTop, w);
+      }
 
-      drawCurvePath();
-      ctx.strokeStyle = COLORS.timeCurveLine;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+    } else {
+      // ---- SINGLE VIEW (no reference) ----
+      drawHalf(cls, $stretchMarkers, MARGIN.t, h - MARGIN.b, w, false);
+
+      // MIDI reference pitch lines
+      const midiData = $midiNotes;
+      if (midiData.length > 0) {
+        const midiFreqs = midiData.map(n => n.frequency);
+        const minFreq = Math.min(...midiFreqs);
+        const maxFreq = Math.max(...midiFreqs);
+        const midiRowTop = MARGIN.t + plotH * 0.70;
+        const midiRowHeight = plotH * 0.25;
+
+        const freqRange = maxFreq - minFreq;
+        const freqToY = (freq: number): number => {
+          if (freqRange < 1) return midiRowTop + midiRowHeight / 2;
+          const ratio = (freq - minFreq) / freqRange;
+          return midiRowTop + midiRowHeight - ratio * midiRowHeight;
+        };
+
+        ctx.fillStyle = COLORS.textDim;
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText('MIDI', MARGIN.l - 6, midiRowTop);
+
+        for (let i = 0; i < midiData.length; i++) {
+          const mn = midiData[i];
+          const x0 = timeToPx(mn.start_time);
+          const x1 = timeToPx(mn.end_time);
+          if (x1 < MARGIN.l || x0 > w - MARGIN.r) continue;
+
+          const y = freqToY(mn.frequency);
+          ctx.strokeStyle = COLORS.midiLine;
+          ctx.lineWidth = MIDI_LINE_HEIGHT;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(Math.max(x0, MARGIN.l), y);
+          ctx.lineTo(Math.min(x1, w - MARGIN.r), y);
+          ctx.stroke();
+
+          if (x1 - x0 > 18) {
+            ctx.fillStyle = COLORS.midiText;
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(mn.note_name, Math.max(x0, MARGIN.l) + 2, y - 3);
+          }
+        }
+      }
+
+      // Time correction curve full height
+      if ($showCorrectionCurve && $stretchMarkers.length > 0) {
+        drawTimeCurve(cls, $stretchMarkers, MARGIN.t, plotH, w);
+      }
     }
 
-    // Playhead
+    // Playhead (full height)
     const phx = timeToPx(_playheadTime);
     if (phx >= MARGIN.l && phx <= w - MARGIN.r) {
       ctx.strokeStyle = COLORS.playhead;
@@ -474,6 +487,109 @@
     ctx.fillText('Time (s)', w / 2, h - 6);
   }
 
+  function drawTimeCurve(cls: Cluster[], markers: StretchMarker[], areaTop: number, areaH: number, w: number) {
+    const curveTop = areaTop + areaH * TIME_CURVE_TOP_FRAC;
+    const curveH = areaH * TIME_CURVE_HEIGHT_FRAC;
+    const baselineY = curveTop + curveH / 2;
+
+    let keypoints: { src: number; tgt: number }[];
+
+    if (!$dirtyStretchMarkers && $backendTimemap.length > 0) {
+      keypoints = $backendTimemap.map(e => ({ src: e.source_s, tgt: e.target_s }));
+    } else {
+      const kpSet = new Map<number, number>();
+      kpSet.set(0, 0);
+
+      const movedMarkers = markers.filter(m => Math.abs(m.currentTime - m.originalTime) > 0.0001);
+      const movedAdjacentLeft = new Set<number>();
+      const movedAdjacentRight = new Set<number>();
+
+      for (const m of movedMarkers) {
+        kpSet.set(m.originalTime, m.currentTime);
+        movedAdjacentLeft.add(m.leftClusterIdx);
+        movedAdjacentRight.add(m.rightClusterIdx);
+      }
+
+      for (let i = 0; i < cls.length; i++) {
+        if (!movedAdjacentRight.has(i)) {
+          if (!kpSet.has(cls[i].start_time)) kpSet.set(cls[i].start_time, cls[i].start_time);
+        }
+        if (!movedAdjacentLeft.has(i)) {
+          if (!kpSet.has(cls[i].end_time)) kpSet.set(cls[i].end_time, cls[i].end_time);
+        }
+      }
+
+      const lastEnd = cls.length > 0 ? cls[cls.length - 1].end_time + 1 : 1;
+      if (!kpSet.has(lastEnd)) kpSet.set(lastEnd, lastEnd);
+
+      keypoints = Array.from(kpSet.entries())
+        .map(([src, tgt]) => ({ src, tgt }))
+        .sort((a, b) => a.src - b.src);
+    }
+
+    const MAX_DEV = 4;
+    type KpSegment = { tgtStart: number; tgtEnd: number; dev: number };
+    const kpSegments: KpSegment[] = [];
+    let maxDev = 0;
+
+    for (let i = 1; i < keypoints.length; i++) {
+      const srcDur = keypoints[i].src - keypoints[i - 1].src;
+      const tgtDur = keypoints[i].tgt - keypoints[i - 1].tgt;
+      let dev = 0;
+      if (srcDur > 0.001 && tgtDur > 0.001) {
+        dev = Math.log2(srcDur / tgtDur);
+      } else if (srcDur > 0.001) {
+        dev = MAX_DEV;
+      } else if (tgtDur > 0.001) {
+        dev = -MAX_DEV;
+      }
+      dev = Math.max(-MAX_DEV, Math.min(MAX_DEV, dev));
+      kpSegments.push({ tgtStart: keypoints[i - 1].tgt, tgtEnd: keypoints[i].tgt, dev });
+      if (Math.abs(dev) > maxDev) maxDev = Math.abs(dev);
+    }
+
+    const scale = Math.max(maxDev * 1.3, 3.0);
+
+    ctx.strokeStyle = COLORS.timeCurveBaseline;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(MARGIN.l, baselineY);
+    ctx.lineTo(w - MARGIN.r, baselineY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = COLORS.timeCurveLine;
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Time', MARGIN.l - 6, baselineY);
+
+    function drawCurvePath() {
+      ctx.beginPath();
+      ctx.moveTo(MARGIN.l, baselineY);
+      for (const seg of kpSegments) {
+        const devY = baselineY - (seg.dev / scale) * (curveH / 2);
+        const x0 = timeToPx(seg.tgtStart);
+        const x1 = timeToPx(seg.tgtEnd);
+        ctx.lineTo(x0, devY);
+        ctx.lineTo(x1, devY);
+      }
+      ctx.lineTo(w - MARGIN.r, baselineY);
+    }
+
+    drawCurvePath();
+    ctx.lineTo(w - MARGIN.r, baselineY);
+    ctx.closePath();
+    ctx.fillStyle = COLORS.timeCurveFill;
+    ctx.fill();
+
+    drawCurvePath();
+    ctx.strokeStyle = COLORS.timeCurveLine;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
   function scheduleDraw() {
     if (_rafPending) return;
     _rafPending = true;
@@ -485,7 +601,15 @@
 
   // --- Interactions ---
 
-  function getMarkerAtPx(px: number): number | null {
+  function getMarkerAtPx(px: number, py: number): number | null {
+    // Only allow interaction with main markers (not reference)
+    const h = containerEl.getBoundingClientRect().height;
+    const showSplit = $referenceClusters.length > 0;
+    if (showSplit) {
+      const splitY = getSplitY(h);
+      if (py < splitY) return null;  // in reference half — no interaction
+    }
+
     const markers = $stretchMarkers;
     for (let i = 0; i < markers.length; i++) {
       const x = timeToPx(markers[i].currentTime);
@@ -495,10 +619,16 @@
   }
 
   function getClusterAtPx(px: number, py: number): number | null {
-    const plotH = containerEl.getBoundingClientRect().height - MARGIN.t - MARGIN.b;
-    const labelY = MARGIN.t + plotH * NOTE_LABEL_Y;
-    // Click anywhere in the note region
-    if (py < MARGIN.t || py > containerEl.getBoundingClientRect().height - MARGIN.b) return null;
+    const h = containerEl.getBoundingClientRect().height;
+    const showSplit = $referenceClusters.length > 0;
+
+    // Only select main clusters (lower half in split mode)
+    if (showSplit) {
+      const splitY = getSplitY(h);
+      if (py < splitY) return null;
+    }
+
+    if (py < MARGIN.t || py > h - MARGIN.b) return null;
 
     const cls = $clusters;
     for (let i = cls.length - 1; i >= 0; i--) {
@@ -517,7 +647,6 @@
 
   function clampMarker(markerIdx: number, time: number): number {
     const markers = $stretchMarkers;
-    // Can't cross adjacent markers
     const minTime = markerIdx > 0
       ? markers[markerIdx - 1].currentTime + 0.005
       : 0.005;
@@ -542,7 +671,6 @@
       const px = e.clientX - rect.left;
       const py = e.clientY - rect.top;
 
-      // Alt+empty → draw-box
       if (e.altKey && isInPlotArea(px, py)) {
         mode = 'draw-box';
         drawStartTime = pxToTime(px);
@@ -554,7 +682,6 @@
         return;
       }
 
-      // Ctrl+Shift+Drag → pan
       if (e.ctrlKey && e.shiftKey && isInPlotArea(px, py)) {
         mode = 'pan';
         startX = e.clientX;
@@ -565,8 +692,7 @@
         return;
       }
 
-      // Marker drag
-      const markerIdx = getMarkerAtPx(px);
+      const markerIdx = getMarkerAtPx(px, py);
       if (markerIdx !== null) {
         mode = 'marker-drag';
         dragMarkerIdx = markerIdx;
@@ -578,7 +704,6 @@
         return;
       }
 
-      // Click on cluster → select
       const clusterIdx = getClusterAtPx(px, py);
       if (clusterIdx !== null) {
         if (e.shiftKey) {
@@ -598,7 +723,6 @@
         return;
       }
 
-      // Click on empty → deselect + seek
       if (isInPlotArea(px, py)) {
         $selectedIndices = new Set();
         $selectedIdx = null;
@@ -609,29 +733,28 @@
       }
     });
 
-    // Double-click to reset marker
     canvasEl.addEventListener('dblclick', (e: MouseEvent) => {
       const rect = canvasEl.getBoundingClientRect();
       const px = e.clientX - rect.left;
-      const markerIdx = getMarkerAtPx(px);
+      const py = e.clientY - rect.top;
+      const markerIdx = getMarkerAtPx(px, py);
       if (markerIdx !== null) {
         const markers = [...$stretchMarkers];
         markers[markerIdx] = { ...markers[markerIdx], currentTime: markers[markerIdx].originalTime };
         $stretchMarkers = markers;
         $dirtyStretchMarkers = true;
         scheduleDraw();
-        onEditComplete?.();
+        onEditComplete?.(markerIdx);
         e.preventDefault();
       }
     });
 
     window.addEventListener('mousemove', (e: MouseEvent) => {
       if (!mode) {
-        // Cursor hints
         const rect = canvasEl.getBoundingClientRect();
         const px = e.clientX - rect.left;
         const py = e.clientY - rect.top;
-        const markerIdx = getMarkerAtPx(px);
+        const markerIdx = getMarkerAtPx(px, py);
         if (markerIdx !== null) {
           canvasEl.style.cursor = 'ew-resize';
         } else if (e.altKey && isInPlotArea(px, py)) {
@@ -693,7 +816,7 @@
     window.addEventListener('mouseup', (e: MouseEvent) => {
       if (mode === 'marker-drag') {
         canvasEl.style.cursor = '';
-        if (hasMoved) onEditComplete?.();
+        if (hasMoved && dragMarkerIdx !== null) onEditComplete?.(dragMarkerIdx);
       } else if (mode === 'draw-box') {
         if (hasMoved && drawStartTime !== null) {
           const rect = canvasEl.getBoundingClientRect();
@@ -717,7 +840,6 @@
       hasMoved = false;
     });
 
-    // Scroll zoom
     let _zoomRafPending = false;
     let _pendingZoom: { delta: number; px: number } | null = null;
 
@@ -765,6 +887,7 @@
     void $selectedIndices;
     void $stretchMarkers;
     void $referenceClusters;
+    void $referenceStretchMarkers;
     void $midiNotes;
     void $showCorrectionCurve;
     void $backendTimemap;

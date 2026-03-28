@@ -86,12 +86,20 @@ def _apply_duration_tier(manipulation, duration, time_map, sr):
 
     time_map: list of (source_frame, target_frame) pairs.
     DurationTier uses duration factors: >1 stretches, <1 compresses.
+
+    Places factor points at both edges of each region (with a tiny inset)
+    so Praat doesn't interpolate across region boundaries.
     """
     duration_tier = call(manipulation, "Extract duration tier")
     call(duration_tier, "Remove points between...", 0.0, duration)
 
+    # Small inset to avoid placing two points at the exact same time
+    EDGE_INSET_S = 0.001
+
     # Convert frame-pair time map to local duration factors.
     # Each pair of consecutive keypoints defines a region with a stretch ratio.
+    print(f"[DURATION_TIER] Converting {len(time_map)} keyframes to duration factors (sr={sr}, duration={duration:.4f}s):")
+    point_count = 0
     for i in range(len(time_map) - 1):
         src_start, tgt_start = time_map[i]
         src_end, tgt_end = time_map[i + 1]
@@ -100,19 +108,38 @@ def _apply_duration_tier(manipulation, duration, time_map, sr):
         tgt_dur = (tgt_end - tgt_start) / sr
 
         if src_dur < 1e-6:
+            print(f"  [{i:2d}] SKIP  src_dur={src_dur:.6f}s (too small)")
             continue
 
         factor = tgt_dur / src_dur
-        # Clamp to reasonable range to avoid Praat errors
+        raw_factor = factor
         factor = max(0.1, min(10.0, factor))
 
-        # Place duration factor at the midpoint of the source region
-        mid_time = (src_start + src_end) / 2.0 / sr
-        if 0 < mid_time < duration:
-            call(duration_tier, "Add point...", float(mid_time), float(factor))
+        # Place factor at both edges of the region (inset slightly) for sharp transitions
+        left_time = src_start / sr + EDGE_INSET_S
+        right_time = src_end / sr - EDGE_INSET_S
+        if left_time >= right_time:
+            # Region too small for two edge points, use midpoint
+            left_time = (src_start + src_end) / 2.0 / sr
+            right_time = None
+
+        region_label = "IDENTITY" if abs(factor - 1.0) < 0.001 else "STRETCH"
+        if right_time is not None:
+            print(f"  [{i:2d}] {region_label:8s}  src=[{src_start/sr:.4f}s..{src_end/sr:.4f}s] ({src_dur:.4f}s)  "
+                  f"tgt_dur={tgt_dur:.4f}s  factor={raw_factor:.4f} -> {factor:.4f}  @edges=[{left_time:.4f}s, {right_time:.4f}s]")
+        else:
+            print(f"  [{i:2d}] {region_label:8s}  src=[{src_start/sr:.4f}s..{src_end/sr:.4f}s] ({src_dur:.4f}s)  "
+                  f"tgt_dur={tgt_dur:.4f}s  factor={raw_factor:.4f} -> {factor:.4f}  @midpoint={left_time:.4f}s")
+
+        if 0 < left_time < duration:
+            call(duration_tier, "Add point...", float(left_time), float(factor))
+            point_count += 1
+        if right_time is not None and 0 < right_time < duration:
+            call(duration_tier, "Add point...", float(right_time), float(factor))
+            point_count += 1
 
     call([duration_tier, manipulation], "Replace duration tier")
-    print(f"[PSOLA] Applied {len(time_map) - 1} duration tier regions")
+    print(f"[DURATION_TIER] Applied {point_count} duration tier points from {len(time_map) - 1} regions")
 
 
 def _resynthesize(manipulation, resynthesis_method, audio_mono, sr, output_path):

@@ -17,12 +17,13 @@
     midiNotes, midiWarnings, selectedIdx, selectedIndices, dirtyClusters,
     audioLoaded, audioUrl, processing, log,
     activeTab, timeEdits, dirtyTimeEdits, backendTimemap, advancedView,
-    stretchMarkers, dirtyStretchMarkers
+    stretchMarkers, dirtyStretchMarkers,
+    referenceClusters, referenceStretchMarkers
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
   import { get } from 'svelte/store';
-  import type { Cluster, MidiWarning } from '$lib/utils/types';
+  import type { Cluster, MidiWarning, StretchMarker, MidiNote } from '$lib/utils/types';
 
   let pitchPlot: PitchPlot;
   let timeAlignmentView: TimeAlignmentView;
@@ -347,6 +348,55 @@
     const p = getAllParams();
     if (p.segment_auto_process && $selectedIdx !== null) {
       processSegment();
+    }
+  }
+
+  async function processTimeSegment(markerIdx: number) {
+    const p = getAllParams();
+    const cls = get(clusters);
+    const markers = get(stretchMarkers);
+
+    if (markerIdx < 0 || markerIdx >= markers.length) return;
+
+    log(`Processing time segment for marker ${markerIdx + 1}...`);
+
+    try {
+      const clusterUpdates = cls.map((c, i) => ({
+        idx: i,
+        start_time: c.start_time,
+        end_time: c.end_time,
+        note: c.note,
+        mean_freq: c.mean_freq,
+        pitch_shift_semitones: c.pitch_shift_semitones,
+        ramp_in_ms: c.ramp_in_ms,
+        ramp_out_ms: c.ramp_out_ms,
+        correction_strength: c.correction_strength,
+        smoothing_percent: c.smoothing_percent,
+        manually_edited: c.manually_edited || false,
+      }));
+
+      const result = await api.processTimeSegment(
+        markerIdx, clusterUpdates, markers,
+        p.segment_padding_ms, p.segment_crossfade_ms, p.segment_crop_ms
+      );
+
+      if (result.error) {
+        log(`Error: ${result.error}`, 'error');
+        return;
+      }
+
+      $audioUrl = api.audioUrl();
+      $dirtyStretchMarkers = false;
+      log(`Time segment processed for marker ${markerIdx + 1}`);
+    } catch (e: any) {
+      log(`Error: ${e}`, 'error');
+    }
+  }
+
+  function autoProcessTimeSegment(markerIdx: number) {
+    const p = getAllParams();
+    if (p.segment_auto_process) {
+      processTimeSegment(markerIdx);
     }
   }
 
@@ -701,6 +751,120 @@
     $backendTimemap = [];
   }
 
+
+  /**
+   * Auto time correct: match main markers to reference markers using MIDI note changes.
+   *
+   * Algorithm:
+   * 1. Find MIDI note boundaries (where one MIDI note ends and another begins)
+   * 2. For each MIDI boundary, find the closest main audio marker within max_distance
+   * 3. For each matched main marker, find the closest reference marker within max_distance
+   * 4. If both found, move the main marker toward the reference marker's position
+   *    by strength%, clamped by max_change_ms
+   */
+  function autoTimeCorrect() {
+    const p = getAllParams();
+    const mainMarkers = get(stretchMarkers);
+    const refMarkers = get(referenceStretchMarkers);
+    const midi = get(midiNotes);
+
+    if (mainMarkers.length === 0 || refMarkers.length === 0 || midi.length < 2) {
+      log('Need main markers, reference markers, and MIDI notes for auto time correct', 'warn');
+      return;
+    }
+
+    const maxDistS = p.time_match_max_distance_ms / 1000;
+    const strength = p.time_match_strength / 100;
+    const maxChangeS = p.time_match_max_change_ms / 1000;
+
+    // Step 1: Find MIDI note boundaries (transitions between consecutive MIDI notes)
+    const midiBoundaries: number[] = [];
+    for (let i = 0; i < midi.length - 1; i++) {
+      // The boundary is where one MIDI note ends / next begins
+      // Use the midpoint between end of current and start of next if there's a gap
+      const boundary = (midi[i].end_time + midi[i + 1].start_time) / 2;
+      midiBoundaries.push(boundary);
+    }
+
+    // Helper: find all marker indices within maxDist of a time
+    function findMarkersInRange(markers: StretchMarker[], time: number, maxDist: number): number[] {
+      const indices: number[] = [];
+      for (let i = 0; i < markers.length; i++) {
+        if (Math.abs(markers[i].originalTime - time) <= maxDist) {
+          indices.push(i);
+        }
+      }
+      return indices;
+    }
+
+    // Helper: find closest marker to a time
+    function findClosestMarker(markers: StretchMarker[], time: number, maxDist: number): number | null {
+      let bestIdx: number | null = null;
+      let bestDist = Infinity;
+      for (let i = 0; i < markers.length; i++) {
+        const dist = Math.abs(markers[i].originalTime - time);
+        if (dist < bestDist && dist <= maxDist) {
+          bestDist = dist;
+          bestIdx = i;
+        }
+      }
+      return bestIdx;
+    }
+
+    // Step 2 & 3: Match markers through MIDI boundaries
+    let matchCount = 0;
+    let moveCount = 0;
+    const newMarkers = mainMarkers.map(m => ({ ...m }));
+
+    for (const boundary of midiBoundaries) {
+      // Find closest reference marker to this MIDI boundary
+      const refIdx = findClosestMarker(refMarkers, boundary, maxDistS);
+      if (refIdx === null) continue;
+
+      const refTime = refMarkers[refIdx].originalTime;
+
+      // Find all main markers within range, then pick the one closest to the reference marker
+      const mainCandidates = findMarkersInRange(mainMarkers, boundary, maxDistS);
+      if (mainCandidates.length === 0) continue;
+
+      let mainIdx = mainCandidates[0];
+      let bestDistToRef = Math.abs(mainMarkers[mainIdx].originalTime - refTime);
+      for (const idx of mainCandidates) {
+        const dist = Math.abs(mainMarkers[idx].originalTime - refTime);
+        if (dist < bestDistToRef) {
+          bestDistToRef = dist;
+          mainIdx = idx;
+        }
+      }
+
+      matchCount++;
+
+      // Step 4: Move main marker toward reference marker position
+      const mainTime = mainMarkers[mainIdx].originalTime;
+      const delta = (refTime - mainTime) * strength;
+
+      // Clamp by max change
+      const clampedDelta = Math.max(-maxChangeS, Math.min(maxChangeS, delta));
+
+      if (Math.abs(clampedDelta) > 0.0001) {
+        newMarkers[mainIdx].currentTime = mainTime + clampedDelta;
+        moveCount++;
+      }
+    }
+
+    // Ensure markers don't cross each other after moving
+    for (let i = 1; i < newMarkers.length; i++) {
+      if (newMarkers[i].currentTime <= newMarkers[i - 1].currentTime + 0.005) {
+        newMarkers[i].currentTime = newMarkers[i - 1].currentTime + 0.005;
+      }
+    }
+
+    $stretchMarkers = newMarkers;
+    $dirtyStretchMarkers = true;
+
+    log(`Auto time correct: ${matchCount} MIDI boundaries matched, ${moveCount} markers moved (strength ${p.time_match_strength}%, max ${p.time_match_max_change_ms}ms)`);
+  }
+
   // --- Playhead sync ---
   function onTimeUpdate(time: number) {
     if ($activeTab === 'pitch') {
@@ -768,6 +932,7 @@
       onApplyTimeEdits={applyTimeEdits}
       onExport={runExport}
       onResetMarkers={resetAllMarkers}
+      onAutoTimeCorrect={autoTimeCorrect}
     />
   {/if}
 
@@ -795,7 +960,7 @@
         {onDrawBox}
         {syncWaveform}
         {onSeek}
-        onEditComplete={autoProcessSegment}
+        onEditComplete={autoProcessTimeSegment}
       />
     </div>
 

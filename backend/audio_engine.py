@@ -1461,6 +1461,317 @@ def process_segment(audio, sr, clusters, cluster_idx, params, corrected_audio_pa
     return result, "OK"
 
 
+def process_time_segment(audio, sr, clusters, markers, marker_idx, params,
+                         corrected_audio_path, stretch_markers_raw=None,
+                         padding_ms=100, crossfade_ms=10, crop_ms=50):
+    """
+    Process a time-alignment segment when a stretch marker is moved.
+
+    The dirty region spans from the previous marker to the next marker
+    (plus padding on each end). This ensures the segment boundaries
+    are in unchanged regions, allowing seamless crossfade splicing.
+
+    Args:
+        audio: Original audio array
+        sr: Sample rate
+        clusters: All clusters
+        markers: All stretch markers (dict format)
+        marker_idx: Index of the moved marker
+        params: Processing parameters
+        corrected_audio_path: Path to current corrected audio file
+        stretch_markers_raw: Raw marker dicts for time map generation
+        padding_ms: Padding on each end of the segment
+        crossfade_ms: Crossfade length for splicing
+        crop_ms: Crop from each end to remove processing artifacts
+    """
+    from time_engine import generate_time_map_from_markers, run_rubberband_with_timemap
+
+    audio_mono = get_audio_mono(audio)
+    audio_length = len(audio_mono)
+    padding_s = padding_ms / 1000.0
+    crossfade_s = crossfade_ms / 1000.0
+    crossfade_samples = int(crossfade_s * sr)
+    crop_samples = int((crop_ms / 1000.0) * sr)
+
+    # Determine segment boundaries from adjacent markers
+    if marker_idx > 0:
+        prev_marker_time = markers[marker_idx - 1]['originalTime']
+    else:
+        prev_marker_time = 0.0
+
+    if marker_idx < len(markers) - 1:
+        next_marker_time = markers[marker_idx + 1]['originalTime']
+    else:
+        next_marker_time = audio_length / sr
+
+    seg_start = max(0, prev_marker_time - padding_s)
+    seg_end = min(audio_length / sr, next_marker_time + padding_s)
+
+    seg_start_sample = int(seg_start * sr)
+    seg_end_sample = int(seg_end * sr)
+    segment = audio_mono[seg_start_sample:seg_end_sample]
+
+    # --- Generate full pitch map ---
+    gap_threshold = params.get("gap_threshold_ms", DEFAULT_GAP_THRESHOLD_MS)
+    smooth_curve = params.get("smooth_curve", DEFAULT_SMOOTH_CURVE)
+    full_pitch_map = generate_pitch_map(clusters, sr, audio_length, gap_threshold, smooth_curve)
+    pitch_map = _scope_pitch_map_to_segment(full_pitch_map, seg_start_sample, seg_end_sample)
+
+    has_pitch = any(
+        c["pitch_shift_semitones"] != 0 or c.get("smoothing_percent", 0) != 0
+        for c in clusters
+    )
+    has_pitch = has_pitch and any(abs(s) > 1e-6 for _, s in pitch_map)
+
+    # --- Generate full time map ---
+    use_markers = stretch_markers_raw if stretch_markers_raw else markers
+    full_time_map = generate_time_map_from_markers(clusters, use_markers, sr, audio_length)
+    has_time = len(full_time_map) > 0
+
+    if has_time:
+        seg_time_map = _scope_time_map_to_segment(full_time_map, seg_start_sample, seg_end_sample)
+        has_time = len(seg_time_map) > 2 or any(src != tgt for src, tgt in seg_time_map)
+
+    rb_params = params.get("rb", {})
+
+    if not rb_params.get('enable_pitchmap', True):
+        has_pitch = False
+    if not rb_params.get('enable_timemap', True):
+        has_time = False
+
+    # --- Compute splice positions in corrected audio using the time map ---
+    # The corrected audio reflects all previous corrections. We need to find
+    # where the segment boundaries map to in the output coordinate system.
+    if full_time_map:
+        tm = sorted(full_time_map, key=lambda x: x[0])
+
+        def _interp_target(src_frame):
+            if src_frame <= tm[0][0]:
+                return tm[0][1]
+            if src_frame >= tm[-1][0]:
+                return tm[-1][1]
+            for i in range(len(tm) - 1):
+                s0, t0 = tm[i]
+                s1, t1 = tm[i + 1]
+                if s0 <= src_frame <= s1:
+                    if s1 == s0:
+                        return t0
+                    frac = (src_frame - s0) / (s1 - s0)
+                    return t0 + frac * (t1 - t0)
+            return src_frame
+
+        splice_start_sample = int(_interp_target(seg_start_sample))
+        splice_end_sample = int(_interp_target(seg_end_sample))
+    else:
+        # No time map: positions are identity
+        splice_start_sample = seg_start_sample
+        splice_end_sample = seg_end_sample
+
+    # --- Pass 1: Pitch correction ---
+    engine = params.get("pitch_engine", "rubberband")
+
+    if has_pitch:
+        if engine == "fd_psola":
+            from fd_psola_engine import run_fd_psola_pitch_shift
+            fd_psola_params = params.get("fd_psola", {}).copy()
+            f0_data = fd_psola_params.pop("_parselmouth_f0", None)
+            seg_f0_times = None
+            seg_f0_freqs = None
+            if f0_data is not None:
+                f0_t = np.asarray(f0_data["times"])
+                f0_f = np.asarray(f0_data["frequencies"])
+                mask = (f0_t >= seg_start) & (f0_t <= seg_end)
+                seg_f0_times = f0_t[mask] - seg_start
+                seg_f0_freqs = f0_f[mask]
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                pitch_output = f.name
+            success, msg = run_fd_psola_pitch_shift(
+                segment, sr, pitch_map, pitch_output, fd_psola_params,
+                original_times=seg_f0_times,
+                original_frequencies=seg_f0_freqs,
+            )
+            if not success:
+                if os.path.exists(pitch_output):
+                    os.remove(pitch_output)
+                return None, msg
+            pitched_seg, _ = sf.read(pitch_output)
+            os.remove(pitch_output)
+            if len(pitched_seg.shape) > 1:
+                pitched_seg = pitched_seg.mean(axis=1)
+        elif engine == "psola":
+            from psola_engine import run_psola_pitch_shift
+            psola_params = params.get("psola", {}).copy()
+            f0_data = psola_params.pop("_parselmouth_f0", None)
+            seg_f0_times = None
+            seg_f0_freqs = None
+            if f0_data is not None:
+                f0_t = np.asarray(f0_data["times"])
+                f0_f = np.asarray(f0_data["frequencies"])
+                mask = (f0_t >= seg_start) & (f0_t <= seg_end)
+                seg_f0_times = f0_t[mask] - seg_start
+                seg_f0_freqs = f0_f[mask]
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                pitch_output = f.name
+            success, msg = run_psola_pitch_shift(
+                segment, sr, pitch_map, pitch_output, psola_params,
+                original_times=seg_f0_times,
+                original_frequencies=seg_f0_freqs,
+            )
+            if not success:
+                if os.path.exists(pitch_output):
+                    os.remove(pitch_output)
+                return None, msg
+            pitched_seg, _ = sf.read(pitch_output)
+            os.remove(pitch_output)
+            if len(pitched_seg.shape) > 1:
+                pitched_seg = pitched_seg.mean(axis=1)
+        elif engine == "sms":
+            from sms_engine import run_sms_pitch_shift
+            sms_params = params.get("sms", {})
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                pitch_output = f.name
+            success, msg, _ = run_sms_pitch_shift(
+                segment, sr, pitch_map, pitch_output, sms_params
+            )
+            if not success:
+                if os.path.exists(pitch_output):
+                    os.remove(pitch_output)
+                return None, msg
+            pitched_seg, _ = sf.read(pitch_output)
+            os.remove(pitch_output)
+            if len(pitched_seg.shape) > 1:
+                pitched_seg = pitched_seg.mean(axis=1)
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                pitch_output = f.name
+            success, msg = run_rubberband(segment, sr, pitch_map, pitch_output, rb_params)
+            if not success:
+                if os.path.exists(pitch_output):
+                    os.remove(pitch_output)
+                return None, msg
+            pitched_seg, _ = sf.read(pitch_output)
+            os.remove(pitch_output)
+            if len(pitched_seg.shape) > 1:
+                pitched_seg = pitched_seg.mean(axis=1)
+    else:
+        pitched_seg = segment
+
+    # --- Pass 2: Time stretching ---
+    if has_time:
+        duration_s = len(pitched_seg) / sr
+
+        if engine == "psola":
+            from psola_engine import run_psola_time_stretch
+            psola_params = params.get("psola", {}).copy()
+            f0_data = psola_params.pop("_parselmouth_f0", None)
+            seg_f0_times = None
+            seg_f0_freqs = None
+            if f0_data is not None:
+                f0_t = np.asarray(f0_data["times"])
+                f0_f = np.asarray(f0_data["frequencies"])
+                mask = (f0_t >= seg_start) & (f0_t <= seg_end)
+                seg_f0_times = f0_t[mask] - seg_start
+                seg_f0_freqs = f0_f[mask]
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                time_output = f.name
+            try:
+                success, msg = run_psola_time_stretch(
+                    pitched_seg, sr, seg_time_map, time_output, psola_params,
+                    original_times=seg_f0_times,
+                    original_frequencies=seg_f0_freqs,
+                )
+                if not success:
+                    return None, msg
+                processed_seg, _ = sf.read(time_output)
+                if len(processed_seg.shape) > 1:
+                    processed_seg = processed_seg.mean(axis=1)
+            finally:
+                if os.path.exists(time_output):
+                    os.remove(time_output)
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                time_input = f.name
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                time_output = f.name
+
+            sf.write(time_input, pitched_seg, int(sr))
+
+            try:
+                success, msg = run_rubberband_with_timemap(
+                    time_input, time_output, seg_time_map, duration_s, rb_params
+                )
+                if not success:
+                    return None, msg
+                processed_seg, _ = sf.read(time_output)
+                if len(processed_seg.shape) > 1:
+                    processed_seg = processed_seg.mean(axis=1)
+            finally:
+                for f in [time_input, time_output]:
+                    if os.path.exists(f):
+                        os.remove(f)
+    else:
+        processed_seg = pitched_seg
+
+    # --- Crop ends to remove processing artifacts ---
+    if crop_samples > 0 and len(processed_seg) > 2 * crop_samples:
+        processed_seg = processed_seg[crop_samples:-crop_samples]
+        splice_start_sample += crop_samples
+        splice_end_sample -= crop_samples
+
+    splice_length = splice_end_sample - splice_start_sample
+
+    # --- Load corrected audio and splice ---
+    if os.path.exists(corrected_audio_path):
+        corrected, _ = sf.read(corrected_audio_path)
+    else:
+        corrected = audio_mono.copy()
+
+    if len(corrected.shape) > 1:
+        corrected = corrected.mean(axis=1)
+
+    # Trim/pad processed segment to match splice region length
+    if len(processed_seg) > splice_length:
+        processed_seg = processed_seg[:splice_length]
+    elif len(processed_seg) < splice_length:
+        processed_seg = np.pad(processed_seg, (0, splice_length - len(processed_seg)))
+
+    result = corrected.copy()
+
+    # Crossfade at start
+    if splice_start_sample > 0 and crossfade_samples > 0:
+        fade_in = np.linspace(0, 1, crossfade_samples)
+        fade_out = np.linspace(1, 0, crossfade_samples)
+        end_cf = min(
+            splice_start_sample + crossfade_samples,
+            len(result),
+            len(processed_seg) + splice_start_sample,
+        )
+        cf_len = end_cf - splice_start_sample
+        if cf_len > 0:
+            result[splice_start_sample:end_cf] = (
+                result[splice_start_sample:end_cf] * fade_out[:cf_len]
+                + processed_seg[:cf_len] * fade_in[:cf_len]
+            )
+        result[end_cf:splice_end_sample] = processed_seg[cf_len:splice_length]
+    else:
+        result[splice_start_sample:splice_end_sample] = processed_seg[:splice_length]
+
+    # Crossfade at end
+    if splice_end_sample < len(result) and crossfade_samples > 0:
+        fade_in = np.linspace(0, 1, crossfade_samples)
+        fade_out = np.linspace(1, 0, crossfade_samples)
+        start_cf = max(0, splice_end_sample - crossfade_samples)
+        cf_len = splice_end_sample - start_cf
+        seg_offset = splice_length - cf_len
+        if cf_len > 0 and seg_offset >= 0:
+            result[start_cf:splice_end_sample] = (
+                processed_seg[seg_offset : seg_offset + cf_len] * fade_out[:cf_len]
+                + result[start_cf:splice_end_sample] * fade_in[:cf_len]
+            )
+
+    return result, "OK"
+
+
 def clusters_to_json(clusters):
     """Convert clusters to JSON-serializable format."""
     result = []

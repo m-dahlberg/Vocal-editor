@@ -101,6 +101,10 @@ export function exportUrl(): string {
   return '/api/export';
 }
 
+export async function processTimeSegment(markerIdx: number, allClusters: Partial<Cluster>[], stretchMarkers: StretchMarker[], paddingMs?: number, crossfadeMs?: number, cropMs?: number): Promise<any> {
+  return post('/api/process_time_segment', { marker_idx: markerIdx, clusters: allClusters, stretch_markers: stretchMarkers, padding_ms: paddingMs, crossfade_ms: crossfadeMs, crop_ms: cropMs });
+}
+
 export async function syncTimeEdits(edits: TimeEdit[], stretchMarkers?: StretchMarker[]): Promise<TimeStretchResult> {
   return post('/api/sync_time_edits', { time_edits: edits, stretch_markers: stretchMarkers ?? [] });
 }

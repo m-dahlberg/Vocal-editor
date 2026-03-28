@@ -27,7 +27,7 @@ def generate_time_map_from_markers(clusters, markers, sr, audio_length):
 
     Each marker has: id, originalTime, currentTime, leftClusterIdx, rightClusterIdx.
     Moved markers produce keypoints at (originalTime, currentTime).
-    All cluster boundaries not adjacent to a moved marker get identity anchors.
+    Unmoved markers produce identity anchors to contain changes.
 
     Returns list of (source_frame, target_frame) pairs sorted by source frame.
     """
@@ -35,44 +35,27 @@ def generate_time_map_from_markers(clusters, markers, sr, audio_length):
         return []
 
     # Check if any marker has actually been moved
-    moved_markers = [m for m in markers if abs(m['originalTime'] - m['currentTime']) > 0.0001]
-    if not moved_markers:
+    has_moved = any(abs(m['originalTime'] - m['currentTime']) > 0.0001 for m in markers)
+    if not has_moved:
         return []
 
     keyframes = set()
     keyframes.add((0, 0))
     keyframes.add((audio_length - 1, audio_length - 1))
 
-    # Build set of cluster indices adjacent to moved markers
-    moved_adjacent = set()
-    for m in moved_markers:
+    for m in markers:
         src_frame = int(m['originalTime'] * sr)
         tgt_frame = int(m['currentTime'] * sr)
+        moved = abs(m['originalTime'] - m['currentTime']) > 0.0001
+        tag = "MOVED" if moved else "anchor"
+        print(f"[TIME_MAP] Marker {m.get('id','?'):20s}  src={m['originalTime']:.4f}s  tgt={m['currentTime']:.4f}s  ({tag})")
         keyframes.add((src_frame, tgt_frame))
-        moved_adjacent.add(m.get('leftClusterIdx'))
-        moved_adjacent.add(m.get('rightClusterIdx'))
-
-    # Pin all cluster boundaries not adjacent to a moved marker as identity anchors
-    for i, c in enumerate(clusters):
-        src_start = int(c['start_time'] * sr)
-        src_end = int(c['end_time'] * sr)
-
-        # Check if this cluster's start boundary is adjacent to a moved marker
-        # (i.e., there's a moved marker between cluster i-1 and cluster i)
-        start_has_moved = False
-        end_has_moved = False
-        for m in moved_markers:
-            if m.get('rightClusterIdx') == i:
-                start_has_moved = True
-            if m.get('leftClusterIdx') == i:
-                end_has_moved = True
-
-        if not start_has_moved:
-            keyframes.add((src_start, src_start))
-        if not end_has_moved:
-            keyframes.add((src_end, src_end))
 
     result = sorted(keyframes, key=lambda x: x[0])
+    print(f"[TIME_MAP] Final keyframes ({len(result)}):")
+    for i, (src, tgt) in enumerate(result):
+        delta_ms = (tgt - src) / sr * 1000
+        print(f"  [{i:2d}] src_frame={src:8d} ({src/sr:.4f}s)  tgt_frame={tgt:8d} ({tgt/sr:.4f}s)  delta={delta_ms:+.1f}ms")
     return result
 
 

@@ -116,6 +116,11 @@ export interface Params {
   max_gap_stretch: number;      // max stretch as % of original
   max_gap_compress: number;     // min size as % of original (0 = can fully remove)
   voicing_threshold: number;
+  // Time auto-correct params
+  time_match_max_distance_ms: number;  // max distance (ms) between MIDI note change and marker to consider a match
+  time_match_strength: number;         // 0-100% how far to move marker toward reference
+  time_match_max_change_ms: number;    // max allowed change per marker (ms)
+  cluster_padding_ms: number;          // padding (ms) from cluster edges for stretch markers
   rb: RubberbandParams;
   pitch_engine: PitchEngine;
   sms: SMSParams;

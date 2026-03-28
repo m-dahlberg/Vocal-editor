@@ -115,13 +115,6 @@
           <input type="number" bind:value={$params.segment_crop_ms} min="0" max="100">
         </div>
       </div>
-      <div class="cluster-param-row">
-        <label>Neighbors</label>
-        <div class="slider-input-pair">
-          <input type="range" min="0" max="5" bind:value={$params.segment_neighbor_count}>
-          <input type="number" bind:value={$params.segment_neighbor_count} min="0" max="5">
-        </div>
-      </div>
       <div class="cluster-param-row" style="margin-top:4px;">
         <label>
           <input type="checkbox" bind:checked={$params.segment_auto_process}>
