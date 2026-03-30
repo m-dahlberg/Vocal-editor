@@ -145,15 +145,19 @@
     const p = getAllParams();
     let targetIdx: number;
 
-    if (warning.type === 'mismatch' && warning.cluster_idx != null) {
-      // Fix existing cluster: correct it to the MIDI reference pitch
-      const c = cls[warning.cluster_idx];
-      if (!c) return;
+    if (warning.type === 'mismatch') {
+      // Fix existing cluster: find by time range (not index, which may be stale)
+      const matchIdx = cls.findIndex(c =>
+        Math.abs(c.start_time - warning.start_time) < 0.01 &&
+        Math.abs(c.end_time - warning.end_time) < 0.01
+      );
+      if (matchIdx === -1) return;
+      const c = cls[matchIdx];
       const centsOff = 1200 * Math.log2(c.mean_freq / warning.midi_freq);
       c.pitch_shift_semitones = -centsOff / 100.0;
       c.correction_strength = 100;
       c.manually_edited = true;
-      targetIdx = warning.cluster_idx;
+      targetIdx = matchIdx;
       $clusters = cls;
       $dirtyClusters = new Set([...$dirtyClusters, targetIdx]);
       log(`Fixed cluster ${targetIdx + 1}: corrected to ${warning.midi_note}`);
