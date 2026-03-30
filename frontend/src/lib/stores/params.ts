@@ -59,9 +59,9 @@ export const params = writable<Params>({
     max_shift_semitones: 12,
   },
   voicing_threshold: 0.75,
-  time_match_max_distance_ms: 500,
-  time_match_strength: 100,
-  time_match_max_change_ms: 200,
+  time_match_max_distance_ms: 400,
+  time_match_strength: 80,
+  time_match_max_change_ms: 150,
   cluster_padding_ms: 300,
   fd_psola: {
     fft_size: 2048,

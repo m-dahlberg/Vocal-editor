@@ -29,10 +29,6 @@
   let timeAlignmentView: TimeAlignmentView;
   let waveformPlayer: WaveformPlayer;
 
-  // Force back to pitch tab when switching to simple mode
-  $: if (!$advancedView && $activeTab === 'time') {
-    $activeTab = 'pitch';
-  }
 
   // --- Pitch curve helpers ---
 

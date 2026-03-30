@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { stretchMarkers, selectedMarkerIdx, clusters } from '$lib/stores/appState';
+  import { stretchMarkers, selectedMarkerIdx, clusters, advancedView } from '$lib/stores/appState';
   import { params } from '$lib/stores/params';
 
   interface Props {
@@ -75,6 +75,7 @@
       {/if}
     {/if}
 
+    {#if $advancedView}
     <div style="margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px;">
       <div style="font-size:0.75rem; color:var(--accent2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;">Segment processing</div>
     </div>
@@ -116,6 +117,7 @@
     >
       {processingSegment ? 'Processing...' : 'Process Segment'}
     </button>
+    {/if}
   </div>
 </aside>
 

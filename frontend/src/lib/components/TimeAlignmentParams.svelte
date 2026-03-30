@@ -1,6 +1,6 @@
 <script lang="ts">
   import { params } from '$lib/stores/params';
-  import { clusters, stretchMarkers, referenceClusters, referenceStretchMarkers, midiNotes } from '$lib/stores/appState';
+  import { clusters, stretchMarkers, referenceClusters, referenceStretchMarkers, midiNotes, advancedView } from '$lib/stores/appState';
 
   interface Props {
     onAnalyze: () => void;
@@ -22,6 +22,7 @@
 <aside class="param-panel">
   <h2>Parameters</h2>
 
+  {#if $advancedView}
   <section>
     <h3>Analysis</h3>
     <div class="param-group">
@@ -34,6 +35,7 @@
       <label>Silence threshold (dB)<input type="number" bind:value={$params.silence_threshold_db}></label>
     </div>
   </section>
+  {/if}
 
   <section>
     <h3>Stretch Markers</h3>
