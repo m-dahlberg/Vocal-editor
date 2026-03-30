@@ -956,8 +956,6 @@
     <div style:display={$activeTab === 'time' ? 'contents' : 'none'}>
       <TimeAlignmentView
         bind:this={timeAlignmentView}
-        {onClusterSelect}
-        {onDrawBox}
         {syncWaveform}
         {onSeek}
         onEditComplete={autoProcessTimeSegment}

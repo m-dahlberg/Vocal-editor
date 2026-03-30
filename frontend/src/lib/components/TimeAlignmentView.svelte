@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
-    clusters, selectedIdx, selectedIndices, stretchMarkers, dirtyStretchMarkers,
+    clusters, selectedIdx, selectedIndices, stretchMarkers, dirtyStretchMarkers, selectedMarkerIdx,
     referenceClusters, referenceStretchMarkers, referenceLoaded,
     midiNotes, showCorrectionCurve, backendTimemap,
     activeTab, viewXRange, waveformReset
@@ -11,14 +11,12 @@
   import type { Cluster, MidiNote, StretchMarker, TimemapEntry } from '$lib/utils/types';
 
   interface Props {
-    onClusterSelect: (idx: number, cluster: Cluster) => void;
-    onDrawBox: (start: number, end: number) => void;
     syncWaveform: (xRange: [number, number], totalDuration: number) => void;
     onSeek?: (time: number) => void;
     onEditComplete?: (markerIdx: number) => void;
   }
 
-  let { onClusterSelect, onDrawBox, syncWaveform, onSeek, onEditComplete }: Props = $props();
+  let { syncWaveform, onSeek, onEditComplete }: Props = $props();
 
   let canvasEl: HTMLCanvasElement;
   let containerEl: HTMLDivElement;
@@ -36,7 +34,6 @@
   }
   let _playheadTime = 0;
   let _mounted = false;
-  let _drawPreview: { startTime: number; endTime: number } | null = null;
 
   const COLORS = {
     bg: '#16213e',
@@ -467,19 +464,6 @@
       ctx.setLineDash([]);
     }
 
-    // Draw-box preview
-    if (_drawPreview) {
-      const dx0 = timeToPx(Math.min(_drawPreview.startTime, _drawPreview.endTime));
-      const dx1 = timeToPx(Math.max(_drawPreview.startTime, _drawPreview.endTime));
-      ctx.fillStyle = 'rgba(255,140,66,0.12)';
-      ctx.fillRect(dx0, MARGIN.t, dx1 - dx0, plotH);
-      ctx.strokeStyle = '#D96C2C';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 4]);
-      ctx.strokeRect(dx0, MARGIN.t, dx1 - dx0, plotH);
-      ctx.setLineDash([]);
-    }
-
     // Time axis label
     ctx.fillStyle = COLORS.textDim;
     ctx.font = '11px sans-serif';
@@ -618,27 +602,6 @@
     return null;
   }
 
-  function getClusterAtPx(px: number, py: number): number | null {
-    const h = containerEl.getBoundingClientRect().height;
-    const showSplit = $referenceClusters.length > 0;
-
-    // Only select main clusters (lower half in split mode)
-    if (showSplit) {
-      const splitY = getSplitY(h);
-      if (py < splitY) return null;
-    }
-
-    if (py < MARGIN.t || py > h - MARGIN.b) return null;
-
-    const cls = $clusters;
-    for (let i = cls.length - 1; i >= 0; i--) {
-      const x0 = timeToPx(cls[i].start_time);
-      const x1 = timeToPx(cls[i].end_time);
-      if (px >= x0 && px <= x1) return i;
-    }
-    return null;
-  }
-
   function isInPlotArea(px: number, py: number): boolean {
     const rect = containerEl.getBoundingClientRect();
     return px > MARGIN.l && px < rect.width - MARGIN.r &&
@@ -663,7 +626,6 @@
     let dragMarkerIdx: number | null = null;
     let dragMarkerOrigTime = 0;
     let panStartXRange: [number, number] | null = null;
-    let drawStartTime: number | null = null;
 
     canvasEl.addEventListener('mousedown', (e: MouseEvent) => {
       if (e.button !== 0) return;
@@ -671,15 +633,19 @@
       const px = e.clientX - rect.left;
       const py = e.clientY - rect.top;
 
+      // Alt+click on marker → remove marker
       if (e.altKey && isInPlotArea(px, py)) {
-        mode = 'draw-box';
-        drawStartTime = pxToTime(px);
-        startX = e.clientX;
-        hasMoved = false;
-        canvasEl.style.cursor = 'crosshair';
-        e.preventDefault();
-        e.stopPropagation();
-        return;
+        const markerIdx = getMarkerAtPx(px, py);
+        if (markerIdx !== null) {
+          const markers = [...$stretchMarkers];
+          markers.splice(markerIdx, 1);
+          $stretchMarkers = markers;
+          $dirtyStretchMarkers = true;
+          $selectedMarkerIdx = null;
+          scheduleDraw();
+          e.preventDefault();
+          return;
+        }
       }
 
       if (e.ctrlKey && e.shiftKey && isInPlotArea(px, py)) {
@@ -692,6 +658,37 @@
         return;
       }
 
+      // Ctrl+click → add marker
+      if (e.ctrlKey && isInPlotArea(px, py)) {
+        const clickTime = pxToTime(px);
+        const markers = [...$stretchMarkers];
+        // Find insertion point (markers are sorted by currentTime)
+        let insertIdx = markers.findIndex(m => m.currentTime > clickTime);
+        if (insertIdx === -1) insertIdx = markers.length;
+        // Determine adjacent cluster indices
+        const cls = $clusters;
+        let leftClusterIdx = -1;
+        let rightClusterIdx = cls.length;
+        for (let i = 0; i < cls.length; i++) {
+          if (cls[i].end_time <= clickTime) leftClusterIdx = i;
+          if (cls[i].start_time >= clickTime && rightClusterIdx === cls.length) rightClusterIdx = i;
+        }
+        const newMarker: StretchMarker = {
+          id: `manual-${Date.now()}`,
+          originalTime: clickTime,
+          currentTime: clickTime,
+          leftClusterIdx,
+          rightClusterIdx,
+        };
+        markers.splice(insertIdx, 0, newMarker);
+        $stretchMarkers = markers;
+        $dirtyStretchMarkers = true;
+        $selectedMarkerIdx = insertIdx;
+        scheduleDraw();
+        e.preventDefault();
+        return;
+      }
+
       const markerIdx = getMarkerAtPx(px, py);
       if (markerIdx !== null) {
         mode = 'marker-drag';
@@ -699,33 +696,15 @@
         dragMarkerOrigTime = $stretchMarkers[markerIdx].currentTime;
         startX = e.clientX;
         hasMoved = false;
+        $selectedMarkerIdx = markerIdx;
         canvasEl.style.cursor = 'ew-resize';
-        e.preventDefault();
-        return;
-      }
-
-      const clusterIdx = getClusterAtPx(px, py);
-      if (clusterIdx !== null) {
-        if (e.shiftKey) {
-          const s = new Set($selectedIndices);
-          if (s.has(clusterIdx)) s.delete(clusterIdx); else s.add(clusterIdx);
-          $selectedIndices = s;
-          const first = s.size > 0 ? s.values().next().value! : null;
-          $selectedIdx = first;
-          if (first !== null) onClusterSelect(first, $clusters[first]);
-        } else {
-          $selectedIndices = new Set([clusterIdx]);
-          $selectedIdx = clusterIdx;
-          onClusterSelect(clusterIdx, $clusters[clusterIdx]);
-        }
         scheduleDraw();
         e.preventDefault();
         return;
       }
 
       if (isInPlotArea(px, py)) {
-        $selectedIndices = new Set();
-        $selectedIdx = null;
+        $selectedMarkerIdx = null;
         scheduleDraw();
         const time = pxToTime(px);
         if (onSeek) onSeek(time);
@@ -757,25 +736,11 @@
         const markerIdx = getMarkerAtPx(px, py);
         if (markerIdx !== null) {
           canvasEl.style.cursor = 'ew-resize';
-        } else if (e.altKey && isInPlotArea(px, py)) {
-          canvasEl.style.cursor = 'crosshair';
         } else if (e.ctrlKey && e.shiftKey && isInPlotArea(px, py)) {
           canvasEl.style.cursor = 'grab';
         } else {
           canvasEl.style.cursor = 'default';
         }
-        return;
-      }
-
-      if (mode === 'draw-box' && drawStartTime !== null) {
-        const dx = e.clientX - startX;
-        if (Math.abs(dx) > 2) hasMoved = true;
-        if (!hasMoved) return;
-        const rect = canvasEl.getBoundingClientRect();
-        const currentTime = pxToTime(e.clientX - rect.left);
-        _drawPreview = { startTime: drawStartTime, endTime: currentTime };
-        canvasEl.style.cursor = 'crosshair';
-        scheduleDraw();
         return;
       }
 
@@ -817,20 +782,6 @@
       if (mode === 'marker-drag') {
         canvasEl.style.cursor = '';
         if (hasMoved && dragMarkerIdx !== null) onEditComplete?.(dragMarkerIdx);
-      } else if (mode === 'draw-box') {
-        if (hasMoved && drawStartTime !== null) {
-          const rect = canvasEl.getBoundingClientRect();
-          const endTime = pxToTime(e.clientX - rect.left);
-          const start = Math.min(drawStartTime, endTime);
-          const end = Math.max(drawStartTime, endTime);
-          if (end - start > 0.01) {
-            onDrawBox(start, end);
-          }
-        }
-        _drawPreview = null;
-        drawStartTime = null;
-        canvasEl.style.cursor = '';
-        scheduleDraw();
       } else if (mode === 'pan') {
         canvasEl.style.cursor = '';
       }
@@ -969,7 +920,7 @@
 <div class="plot-container" bind:this={containerEl}>
   <canvas bind:this={canvasEl}></canvas>
   <div class="plot-controls">
-    <span class="zoom-hint">Scroll to zoom · Ctrl+Shift+Drag to pan · Drag markers to stretch · Double-click marker to reset · Alt+Drag to draw box</span>
+    <span class="zoom-hint">Scroll to zoom · Ctrl+Shift+Drag to pan · Drag markers to stretch · Double-click marker to reset · Ctrl+Click to add marker · Alt+Click to remove marker</span>
   </div>
   <ProcessingOverlay />
 </div>

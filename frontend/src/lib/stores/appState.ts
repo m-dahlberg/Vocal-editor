@@ -40,6 +40,7 @@ export const dirtyTimeEdits = writable<Set<number>>(new Set());
 // Stretch markers (new time alignment model)
 export const stretchMarkers = writable<StretchMarker[]>([]);
 export const dirtyStretchMarkers = writable(false);
+export const selectedMarkerIdx = writable<number | null>(null);
 
 // Actual backend timemap (from last sync_time_edits response)
 export const backendTimemap = writable<TimemapEntry[]>([]);

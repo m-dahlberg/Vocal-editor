@@ -82,32 +82,6 @@
     </div>
   </section>
 
-  <section>
-    <h3>Rubberband</h3>
-    <div class="param-group">
-      <label>Command<input type="text" bind:value={$params.rb.command}></label>
-      <label>Crisp level (0-6)<input type="number" bind:value={$params.rb.crisp} min="0" max="6"></label>
-      <label class="checkbox-label">
-        <input type="checkbox" bind:checked={$params.rb.formant}> Formant
-      </label>
-      <label class="checkbox-label">
-        <input type="checkbox" bind:checked={$params.rb.pitch_hq}> Pitch HQ
-      </label>
-      <label class="checkbox-label">
-        <input type="checkbox" bind:checked={$params.rb.window_long}> Window long
-      </label>
-      <label class="checkbox-label">
-        <input type="checkbox" bind:checked={$params.rb.smoothing}> Smoothing
-      </label>
-      <label class="checkbox-label">
-        <input type="checkbox" bind:checked={$params.rb.enable_pitchmap}> Enable pitchmap
-      </label>
-      <label class="checkbox-label">
-        <input type="checkbox" bind:checked={$params.rb.enable_timemap}> Enable timemap
-      </label>
-    </div>
-  </section>
-
   {#if hasPitchEdits}
     <div class="cross-tab-info">+ pitch edits will also be applied</div>
   {/if}

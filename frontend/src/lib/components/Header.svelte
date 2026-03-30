@@ -7,7 +7,7 @@
     midiNotes, avgPitchDeviation, audioUrl, dirtyClusters, log,
     referenceClusters, referenceLoaded, backingLoaded,
     waveformReset, selectedIdx, selectedIndices, timeEdits, dirtyTimeEdits, backendTimemap,
-    advancedView
+    advancedView, stretchMarkers, dirtyStretchMarkers
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
 
@@ -46,6 +46,8 @@
       $selectedIdx = null;
       $selectedIndices = new Set();
       $avgPitchDeviation = null;
+      $stretchMarkers = [];
+      $dirtyStretchMarkers = false;
 
       // Force waveform to fully redraw for the new file
       $waveformReset = $waveformReset + 1;
