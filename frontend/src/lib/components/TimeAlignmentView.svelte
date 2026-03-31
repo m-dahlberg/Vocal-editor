@@ -371,22 +371,68 @@
       ctx.textBaseline = 'top';
       ctx.fillText('MAIN', MARGIN.l - 6, splitY + 2);
 
-      // MIDI note change lines (drawn across both halves for visual alignment reference)
+      // MIDI reference note bars (drawn in the main half)
       const midiData = $midiNotes;
-      if (midiData.length > 1) {
-        ctx.strokeStyle = 'rgba(171,71,188,0.25)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2, 3]);
-        for (let i = 0; i < midiData.length - 1; i++) {
-          const boundary = midiData[i].end_time;
-          const x = timeToPx(boundary);
-          if (x < MARGIN.l || x > w - MARGIN.r) continue;
+      if (midiData.length > 0) {
+        const mainHalfHeight = mainBot - mainTop;
+        const midiRowTop = mainTop + mainHalfHeight * 0.70;
+        const midiRowHeight = mainHalfHeight * 0.25;
+        const midiFreqs = midiData.map(n => n.frequency);
+        const minFreq = Math.min(...midiFreqs);
+        const maxFreq = Math.max(...midiFreqs);
+        const freqRange = maxFreq - minFreq;
+        const freqToY = (freq: number): number => {
+          if (freqRange < 1) return midiRowTop + midiRowHeight / 2;
+          const ratio = (freq - minFreq) / freqRange;
+          return midiRowTop + midiRowHeight - ratio * midiRowHeight;
+        };
+
+        ctx.fillStyle = COLORS.textDim;
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText('MIDI', MARGIN.l - 6, midiRowTop);
+
+        for (let i = 0; i < midiData.length; i++) {
+          const mn = midiData[i];
+          const x0 = timeToPx(mn.start_time);
+          const x1 = timeToPx(mn.end_time);
+          if (x1 < MARGIN.l || x0 > w - MARGIN.r) continue;
+
+          const y = freqToY(mn.frequency);
+          ctx.strokeStyle = COLORS.midiLine;
+          ctx.lineWidth = MIDI_LINE_HEIGHT;
+          ctx.lineCap = 'round';
           ctx.beginPath();
-          ctx.moveTo(x, MARGIN.t);
-          ctx.lineTo(x, h - MARGIN.b);
+          ctx.moveTo(Math.max(x0, MARGIN.l), y);
+          ctx.lineTo(Math.min(x1, w - MARGIN.r), y);
           ctx.stroke();
+
+          if (x1 - x0 > 18) {
+            ctx.fillStyle = COLORS.midiText;
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(mn.note_name, Math.max(x0, MARGIN.l) + 2, y - 3);
+          }
         }
-        ctx.setLineDash([]);
+
+        // Also draw boundary lines across both halves
+        if (midiData.length > 1) {
+          ctx.strokeStyle = 'rgba(171,71,188,0.25)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([2, 3]);
+          for (let i = 0; i < midiData.length - 1; i++) {
+            const boundary = midiData[i].end_time;
+            const x = timeToPx(boundary);
+            if (x < MARGIN.l || x > w - MARGIN.r) continue;
+            ctx.beginPath();
+            ctx.moveTo(x, MARGIN.t);
+            ctx.lineTo(x, h - MARGIN.b);
+            ctx.stroke();
+          }
+          ctx.setLineDash([]);
+        }
       }
 
       // Time correction curve in main half
