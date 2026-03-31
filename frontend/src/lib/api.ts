@@ -1,4 +1,4 @@
-import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, TimeEdit, TimeStretchResult, StretchMarker } from '$lib/utils/types';
+import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, TimeEdit, TimeStretchResult, StretchMarker, DeclickerResult, DeclickerParams } from '$lib/utils/types';
 
 async function post(url: string, body?: object): Promise<any> {
   const opts: RequestInit = { method: 'POST' };
@@ -107,4 +107,29 @@ export async function processTimeSegment(markerIdx: number, allClusters: Partial
 
 export async function syncTimeEdits(edits: TimeEdit[], stretchMarkers?: StretchMarker[]): Promise<TimeStretchResult> {
   return post('/api/sync_time_edits', { time_edits: edits, stretch_markers: stretchMarkers ?? [] });
+}
+
+// De-Clicker API
+export async function declickerDetect(params: DeclickerParams): Promise<DeclickerResult> {
+  return post('/api/declicker/detect', params);
+}
+
+export async function declickerApply(params: DeclickerParams): Promise<DeclickerResult> {
+  return post('/api/declicker/apply', params);
+}
+
+export async function declickerPreview(): Promise<{ ok: boolean; error?: string; url?: string }> {
+  return post('/api/declicker/preview');
+}
+
+export async function declickerReset(): Promise<{ ok: boolean }> {
+  return post('/api/declicker/reset');
+}
+
+export function declickerAudioUrl(): string {
+  return `/api/declicker/audio?t=${Date.now()}`;
+}
+
+export function declickerExportUrl(): string {
+  return '/api/declicker/export';
 }

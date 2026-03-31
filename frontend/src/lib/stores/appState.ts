@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import type { Cluster, MidiNote, MidiWarning, LogMessage, TimeEdit, TimemapEntry, StretchMarker } from '$lib/utils/types';
+import type { Cluster, MidiNote, MidiWarning, LogMessage, TimeEdit, TimemapEntry, StretchMarker, DeclickerDetection } from '$lib/utils/types';
 
 // Audio/analysis state
 export const clusters = writable<Cluster[]>([]);
@@ -31,7 +31,14 @@ export const selectedIndices = writable<Set<number>>(new Set());
 export const dirtyClusters = writable<Set<number>>(new Set());
 
 // Tab state
-export const activeTab = writable<'pitch' | 'time'>('pitch');
+export const activeTab = writable<'declicker' | 'pitch' | 'time'>('declicker');
+
+// Declicker state
+export const declickerDetections = writable<DeclickerDetection[]>([]);
+export const declickerBandCenters = writable<number[]>([]);
+export const declickerBandPeaks = writable<number[][]>([]);
+export const declickerApplied = writable(false);
+export const selectedClickIdx = writable<number | null>(null);
 
 // Time alignment edits (legacy)
 export const timeEdits = writable<TimeEdit[]>([]);

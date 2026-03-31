@@ -26,6 +26,10 @@ def save_as_wav(uploaded_file, wav_path):
             os.remove(tmp_path)
 
 
+from declicker_engine import (
+    get_default_declicker_params, detect_clicks, run_declicker, isolate_clicks,
+)
+
 from audio_engine import (
     analyze_pitch, cluster_notes, parse_midi_file, piano_to_midi_notes, midi_notes_to_file,
     autocorrect_midi, autocorrect_standard,
@@ -68,6 +72,10 @@ SESSION = {
     'reference_clusters': [],
     'backing_path': None,
     'sms_analysis': None,
+    'declicker_params': {},
+    'declicker_detections': None,
+    'declicker_audio': None,
+    'declicker_path': None,
 }
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'vocal_editor'
@@ -159,6 +167,10 @@ def upload_audio():
     SESSION['midi_notes'] = []
     SESSION['corrected_audio'] = None
     SESSION['sms_analysis'] = None
+    SESSION['declicker_params'] = {}
+    SESSION['declicker_detections'] = None
+    SESSION['declicker_audio'] = None
+    SESSION['declicker_path'] = None
 
     return jsonify({'ok': True, 'filename': file.filename})
 
@@ -1213,6 +1225,152 @@ def sync_time_edits():
     except Exception as e:
         import traceback
         return jsonify({'ok': False, 'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+##############################################################################
+# De-Clicker endpoints
+##############################################################################
+
+def _get_declicker_source_audio():
+    """Get the audio to run the declicker on (original upload)."""
+    if SESSION['audio'] is None:
+        return None, None
+    audio = SESSION['audio']
+    if len(audio.shape) > 1:
+        audio = get_audio_mono(audio)
+    return audio, SESSION['sr']
+
+
+@app.route('/api/declicker/detect', methods=['POST'])
+def declicker_detect():
+    """Run click detection only (no repair), return results for visualization."""
+    audio, sr = _get_declicker_source_audio()
+    if audio is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+
+    data = request.get_json(silent=True) or {}
+    params = get_default_declicker_params()
+    params.update(data)
+    SESSION['declicker_params'] = params
+
+    try:
+        result = detect_clicks(audio, sr, params)
+        SESSION['declicker_detections'] = result
+        return jsonify({
+            'ok': True,
+            'click_count': len(result['clicks']),
+            'clicks': result['clicks'],
+            'band_centers': result['band_centers'],
+            'band_peaks': result['band_peaks'],
+            'step_size_s': result['step_size_s'],
+            'num_steps': result['num_steps'],
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+@app.route('/api/declicker/apply', methods=['POST'])
+def declicker_apply():
+    """Run full de-clicker (multi-pass detect + repair), save repaired audio."""
+    audio, sr = _get_declicker_source_audio()
+    if audio is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+
+    data = request.get_json(silent=True) or {}
+    params = get_default_declicker_params()
+    params.update(data)
+    SESSION['declicker_params'] = params
+
+    try:
+        print(f"[declicker/apply] Running declicker on audio shape={audio.shape}, sr={sr}, params={params}")
+        repaired, all_passes = run_declicker(audio, sr, params)
+        print(f"[declicker/apply] Done: {len(all_passes)} passes, repaired shape={repaired.shape}")
+
+        # Save repaired audio
+        path = UPLOAD_DIR / f"declicked_{uuid.uuid4().hex}.wav"
+        sf.write(str(path), repaired, int(sr))
+        SESSION['declicker_audio'] = repaired
+        SESSION['declicker_path'] = str(path)
+        print(f"[declicker/apply] Saved to {path}")
+
+        # Collect all detections from all passes
+        all_clicks = []
+        for p in all_passes:
+            all_clicks.extend(p['clicks'])
+        SESSION['declicker_detections'] = all_passes[-1] if all_passes else None
+
+        return jsonify({
+            'ok': True,
+            'click_count': len(all_clicks),
+            'clicks': all_clicks,
+            'band_centers': all_passes[0]['band_centers'] if all_passes else [],
+            'step_size_s': all_passes[0]['step_size_s'] if all_passes else 0,
+            'num_passes_run': len(all_passes),
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+@app.route('/api/declicker/preview', methods=['POST'])
+def declicker_preview():
+    """Generate isolated clicks audio (original - repaired) for preview."""
+    audio, sr = _get_declicker_source_audio()
+    if audio is None or SESSION['declicker_audio'] is None:
+        return jsonify({'error': 'Run apply first'}), 400
+
+    try:
+        diff = isolate_clicks(audio, SESSION['declicker_audio'])
+        path = UPLOAD_DIR / f"declicker_preview_{uuid.uuid4().hex}.wav"
+        sf.write(str(path), diff, sr)
+        return jsonify({'ok': True, 'url': f'/api/declicker/preview_audio?t={uuid.uuid4().hex}'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/declicker/preview_audio')
+def declicker_preview_audio():
+    """Serve the isolated clicks audio for playback."""
+    # Find the most recent preview file
+    preview_files = sorted(UPLOAD_DIR.glob('declicker_preview_*.wav'))
+    if not preview_files:
+        return jsonify({'error': 'No preview available'}), 404
+    return send_file(str(preview_files[-1]), mimetype='audio/wav')
+
+
+@app.route('/api/declicker/audio')
+def declicker_audio():
+    """Serve the declicked audio for playback."""
+    if not SESSION['declicker_path'] or not os.path.exists(SESSION['declicker_path']):
+        return jsonify({'error': 'No declicked audio available'}), 404
+    return send_file(SESSION['declicker_path'], mimetype='audio/wav')
+
+
+@app.route('/api/declicker/export')
+def declicker_export():
+    """Download the declicked audio file."""
+    if not SESSION['declicker_path'] or not os.path.exists(SESSION['declicker_path']):
+        return jsonify({'error': 'No declicked audio to export'}), 404
+
+    original_name = Path(SESSION['audio_path']).stem if SESSION['audio_path'] else 'audio'
+    return send_file(
+        SESSION['declicker_path'],
+        mimetype='audio/wav',
+        as_attachment=True,
+        download_name=f"{original_name}_declicked.wav"
+    )
+
+
+@app.route('/api/declicker/reset', methods=['POST'])
+def declicker_reset():
+    """Clear all declicker state."""
+    SESSION['declicker_params'] = {}
+    SESSION['declicker_detections'] = None
+    SESSION['declicker_audio'] = None
+    SESSION['declicker_path'] = None
+    return jsonify({'ok': True})
 
 
 if __name__ == '__main__':

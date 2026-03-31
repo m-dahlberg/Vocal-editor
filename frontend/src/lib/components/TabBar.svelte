@@ -1,11 +1,21 @@
 <script lang="ts">
-  import { activeTab, timeEdits, clusters } from '$lib/stores/appState';
+  import { activeTab, timeEdits, clusters, declickerApplied } from '$lib/stores/appState';
 
   const hasTimeEdits = $derived($timeEdits.length > 0);
   const hasPitchEdits = $derived($clusters.some(c => c.pitch_shift_semitones !== 0 || (c.smoothing_percent ?? 0) !== 0));
 </script>
 
 <div class="tab-bar">
+  <button
+    class="tab-btn"
+    class:active={$activeTab === 'declicker'}
+    onclick={() => $activeTab = 'declicker'}
+  >
+    De-Click
+    {#if $declickerApplied}
+      <span class="badge" title="De-click applied"></span>
+    {/if}
+  </button>
   <button
     class="tab-btn"
     class:active={$activeTab === 'pitch'}

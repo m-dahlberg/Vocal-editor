@@ -11,6 +11,9 @@
   import TimeAlignmentParams from '$lib/components/TimeAlignmentParams.svelte';
   import TimeClusterPanel from '$lib/components/TimeClusterPanel.svelte';
   import MixerPanel from '$lib/components/MixerPanel.svelte';
+  import DeclickerParams from '$lib/components/DeclickerParams.svelte';
+  import DeclickerView from '$lib/components/DeclickerView.svelte';
+  import DeclickerInfoPanel from '$lib/components/DeclickerInfoPanel.svelte';
   import * as api from '$lib/api';
   import {
     clusters, times, frequencies, originalTimes, originalFrequencies,
@@ -18,7 +21,8 @@
     audioLoaded, audioUrl, processing, log,
     activeTab, timeEdits, dirtyTimeEdits, backendTimemap, advancedView,
     stretchMarkers, dirtyStretchMarkers,
-    referenceClusters, referenceStretchMarkers
+    referenceClusters, referenceStretchMarkers,
+    declickerDetections, declickerBandCenters, declickerBandPeaks, declickerApplied, selectedClickIdx
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
@@ -27,6 +31,8 @@
 
   let pitchPlot: PitchPlot;
   let timeAlignmentView: TimeAlignmentView;
+  let declickerView: DeclickerView;
+  let declickerParams: DeclickerParams;
   let waveformPlayer: WaveformPlayer;
 
 
@@ -542,6 +548,90 @@
     window.location.href = api.exportUrl();
   }
 
+  // --- De-Clicker actions ---
+
+  async function runDeclickerDetect() {
+    if (!get(audioLoaded)) return;
+    $processing = true;
+    log('Detecting clicks...');
+    try {
+      const p = declickerParams.getParams();
+      const result = await api.declickerDetect(p);
+      if (result.ok) {
+        $declickerDetections = result.clicks || [];
+        $declickerBandCenters = result.band_centers || [];
+        $declickerBandPeaks = result.band_peaks || [];
+        $selectedClickIdx = null;
+        log(`Detected ${result.click_count} clicks`);
+      } else {
+        log(`Detection failed: ${result.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Detection error: ${e}`, 'error');
+    }
+    $processing = false;
+  }
+
+  async function runDeclickerApply() {
+    if (!get(audioLoaded)) return;
+    $processing = true;
+    log('Applying de-click...');
+    try {
+      const p = declickerParams.getParams();
+      const result = await api.declickerApply(p);
+      console.log('[declicker apply] response:', result);
+      if (result.ok) {
+        $declickerDetections = result.clicks || [];
+        $declickerApplied = true;
+        $selectedClickIdx = null;
+        $audioUrl = api.declickerAudioUrl();
+        log(`De-click applied: ${result.click_count} clicks repaired in ${result.num_passes_run} pass(es)`);
+      } else {
+        log(`Apply failed: ${result.error}`, 'error');
+        console.error('[declicker apply] error:', result.error, result.traceback);
+      }
+    } catch (e) {
+      log(`Apply error: ${e}`, 'error');
+    }
+    $processing = false;
+  }
+
+  async function runDeclickerPreview() {
+    $processing = true;
+    log('Generating click preview...');
+    try {
+      const result = await api.declickerPreview();
+      if (result.ok) {
+        log('Preview ready — isolated clicks audio generated');
+      } else {
+        log(`Preview failed: ${result.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Preview error: ${e}`, 'error');
+    }
+    $processing = false;
+  }
+
+  async function runDeclickerReset() {
+    try {
+      await api.declickerReset();
+      $declickerDetections = [];
+      $declickerBandCenters = [];
+      $declickerBandPeaks = [];
+      $declickerApplied = false;
+      $selectedClickIdx = null;
+      $audioUrl = api.audioUrl();
+      log('De-clicker reset');
+    } catch (e) {
+      log(`Reset error: ${e}`, 'error');
+    }
+  }
+
+  function runDeclickerExport() {
+    log('Downloading de-clicked audio...');
+    window.location.href = api.declickerExportUrl();
+  }
+
   async function deleteSelectedCluster() {
     if ($selectedIdx === null) return;
 
@@ -867,12 +957,16 @@
 
   // --- Playhead sync ---
   function onTimeUpdate(time: number) {
+    declickerView?.setPlayheadTime(time);
     if ($activeTab === 'pitch') {
       pitchPlot?.updatePlayhead(time);
       timeAlignmentView?.setPlayheadTime(time);
-    } else {
+    } else if ($activeTab === 'time') {
       timeAlignmentView?.updatePlayhead(time);
       pitchPlot?.setPlayheadTime(time);
+    } else {
+      pitchPlot?.setPlayheadTime(time);
+      timeAlignmentView?.setPlayheadTime(time);
     }
   }
 
@@ -920,7 +1014,16 @@
 <HelpModal />
 
 <div class="main-layout">
-  {#if $activeTab === 'pitch'}
+  {#if $activeTab === 'declicker'}
+    <DeclickerParams
+      bind:this={declickerParams}
+      onDetect={runDeclickerDetect}
+      onApply={runDeclickerApply}
+      onPreview={runDeclickerPreview}
+      onReset={runDeclickerReset}
+      onExport={runDeclickerExport}
+    />
+  {:else if $activeTab === 'pitch'}
     <ParameterPanel
       onAnalyze={runAnalyze}
       onCorrect={runCorrect}
@@ -938,6 +1041,13 @@
 
   <main class="center-panel">
     <TabBar />
+    <div style:display={$activeTab === 'declicker' ? 'contents' : 'none'}>
+      <DeclickerView
+        bind:this={declickerView}
+        {syncWaveform}
+        {onSeek}
+      />
+    </div>
     <div style:display={$activeTab === 'pitch' ? 'contents' : 'none'}>
       <PitchPlot
         bind:this={pitchPlot}
@@ -973,7 +1083,9 @@
   </main>
 
   <div class="right-panel">
-    {#if $activeTab === 'pitch'}
+    {#if $activeTab === 'declicker'}
+      <DeclickerInfoPanel onSeekTime={(t) => waveformPlayer?.seek(t)} />
+    {:else if $activeTab === 'pitch'}
       <ClusterPanel {onClusterParamChange} onProcessSegment={processSegment} onEditComplete={autoProcessSegment} onSeekTime={(t) => waveformPlayer?.seek(t)} />
     {:else}
       <TimeClusterPanel onProcessSegment={processSegment} />

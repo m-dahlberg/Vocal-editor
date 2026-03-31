@@ -177,6 +177,40 @@ export interface FDPSOLAParams {
 
 export type PitchEngine = 'rubberband' | 'sms' | 'psola' | 'fd_psola';
 
+export interface DeclickerDetection {
+  step_idx: number;
+  start_time: number;
+  end_time: number;
+  bands: number[];
+  max_ratio_db: number;
+  is_crackle: boolean;
+}
+
+export interface DeclickerResult {
+  ok: boolean;
+  error?: string;
+  click_count: number;
+  clicks: DeclickerDetection[];
+  band_centers: number[];
+  band_peaks?: number[][];
+  step_size_s: number;
+  num_steps?: number;
+  num_passes_run?: number;
+}
+
+export interface DeclickerParams {
+  num_passes: number;
+  sensitivity_db: number;
+  step_size_ms: number;
+  max_click_length_steps: number;
+  min_separation_steps: number;
+  dense_threshold_db: number;
+  freq_low: number;
+  freq_high: number;
+  num_bands: number;
+  crossfade_ms: number;
+}
+
 export interface TimeEdit {
   clusterIdx: number;
   newStart: number;
