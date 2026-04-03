@@ -31,7 +31,7 @@ export const selectedIndices = writable<Set<number>>(new Set());
 export const dirtyClusters = writable<Set<number>>(new Set());
 
 // Tab state
-export const activeTab = writable<'declicker' | 'pitch' | 'time'>('declicker');
+export const activeTab = writable<'declicker' | 'denoise' | 'pitch' | 'time'>('declicker');
 
 // Declicker state
 export const declickerDetections = writable<DeclickerDetection[]>([]);
@@ -39,6 +39,14 @@ export const declickerBandCenters = writable<number[]>([]);
 export const declickerBandPeaks = writable<number[][]>([]);
 export const declickerApplied = writable(false);
 export const selectedClickIdx = writable<number | null>(null);
+
+// Denoiser state
+export const denoiserApplied = writable(false);
+export const denoiserHeatmapRange = writable(0);  // dB offset: 0 = full range, positive = compress range (boost quiet)
+export const denoiserSpectrogramBefore = writable<number[][] | null>(null);
+export const denoiserSpectrogramAfter = writable<number[][] | null>(null);
+export const denoiserFreqAxis = writable<number[] | null>(null);
+export const denoiserTimeAxis = writable<number[] | null>(null);
 
 // Time alignment edits (legacy)
 export const timeEdits = writable<TimeEdit[]>([]);

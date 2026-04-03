@@ -235,3 +235,23 @@ export interface TimeStretchResult {
   error?: string;
   timemap?: TimemapEntry[];
 }
+
+export interface DenoiserParams {
+  stationary: boolean;
+  prop_decrease: number;
+  time_constant_s: number;
+  freq_mask_smooth_hz: number;
+  time_mask_smooth_ms: number;
+  n_fft: number;
+  noise_start?: number | null;
+  noise_end?: number | null;
+}
+
+export interface DenoiserResult {
+  ok: boolean;
+  error?: string;
+  spectrogram_before?: number[][];
+  spectrogram_after?: number[][];
+  freq_axis?: number[];
+  time_axis?: number[];
+}

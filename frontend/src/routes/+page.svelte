@@ -14,6 +14,9 @@
   import DeclickerParams from '$lib/components/DeclickerParams.svelte';
   import DeclickerView from '$lib/components/DeclickerView.svelte';
   import DeclickerInfoPanel from '$lib/components/DeclickerInfoPanel.svelte';
+  import DenoiserParams from '$lib/components/DenoiserParams.svelte';
+  import DenoiserView from '$lib/components/DenoiserView.svelte';
+  import DenoiserInfoPanel from '$lib/components/DenoiserInfoPanel.svelte';
   import * as api from '$lib/api';
   import {
     clusters, times, frequencies, originalTimes, originalFrequencies,
@@ -22,7 +25,8 @@
     activeTab, timeEdits, dirtyTimeEdits, backendTimemap, advancedView,
     stretchMarkers, dirtyStretchMarkers,
     referenceClusters, referenceStretchMarkers,
-    declickerDetections, declickerBandCenters, declickerBandPeaks, declickerApplied, selectedClickIdx
+    declickerDetections, declickerBandCenters, declickerBandPeaks, declickerApplied, selectedClickIdx,
+    denoiserApplied, denoiserSpectrogramBefore, denoiserSpectrogramAfter, denoiserFreqAxis, denoiserTimeAxis
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
@@ -33,6 +37,8 @@
   let timeAlignmentView: TimeAlignmentView;
   let declickerView: DeclickerView;
   let declickerParams: DeclickerParams;
+  let denoiserView: DenoiserView;
+  let denoiserParamsRef: DenoiserParams;
   let waveformPlayer: WaveformPlayer;
 
 
@@ -632,6 +638,75 @@
     window.location.href = api.declickerExportUrl();
   }
 
+  // --- Denoiser actions ---
+
+  async function runDenoiserAnalyze() {
+    if (!get(audioLoaded)) return;
+    $processing = true;
+    log('Analyzing noise...');
+    try {
+      const p = denoiserParamsRef.getParams();
+      const result = await api.denoiserAnalyze(p);
+      if (result.ok) {
+        $denoiserSpectrogramBefore = result.spectrogram_before || null;
+        $denoiserSpectrogramAfter = result.spectrogram_after || null;
+        $denoiserFreqAxis = result.freq_axis || null;
+        $denoiserTimeAxis = result.time_axis || null;
+        log('Noise analysis complete');
+      } else {
+        log(`Analysis failed: ${result.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Analysis error: ${e}`, 'error');
+    }
+    $processing = false;
+  }
+
+  async function runDenoiserApply() {
+    if (!get(audioLoaded)) return;
+    $processing = true;
+    log('Applying denoise...');
+    try {
+      const p = denoiserParamsRef.getParams();
+      const result = await api.denoiserApply(p);
+      if (result.ok) {
+        $denoiserSpectrogramBefore = result.spectrogram_before || null;
+        $denoiserSpectrogramAfter = result.spectrogram_after || null;
+        $denoiserFreqAxis = result.freq_axis || null;
+        $denoiserTimeAxis = result.time_axis || null;
+        $denoiserApplied = true;
+        $audioUrl = api.denoiserAudioUrl();
+        log('Denoise applied');
+      } else {
+        log(`Denoise failed: ${result.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Denoise error: ${e}`, 'error');
+    }
+    $processing = false;
+  }
+
+  async function runDenoiserReset() {
+    try {
+      await api.denoiserReset();
+      $denoiserApplied = false;
+      $denoiserSpectrogramBefore = null;
+      $denoiserSpectrogramAfter = null;
+      $denoiserFreqAxis = null;
+      $denoiserTimeAxis = null;
+      $audioUrl = api.audioUrl();
+      denoiserView?.clearSelection();
+      log('Denoiser reset');
+    } catch (e) {
+      log(`Reset error: ${e}`, 'error');
+    }
+  }
+
+  function runDenoiserExport() {
+    log('Downloading denoised audio...');
+    window.location.href = api.denoiserExportUrl();
+  }
+
   async function deleteSelectedCluster() {
     if ($selectedIdx === null) return;
 
@@ -958,6 +1033,7 @@
   // --- Playhead sync ---
   function onTimeUpdate(time: number) {
     declickerView?.setPlayheadTime(time);
+    denoiserView?.setPlayheadTime(time);
     if ($activeTab === 'pitch') {
       pitchPlot?.updatePlayhead(time);
       timeAlignmentView?.setPlayheadTime(time);
@@ -1023,6 +1099,15 @@
       onReset={runDeclickerReset}
       onExport={runDeclickerExport}
     />
+  {:else if $activeTab === 'denoise'}
+    <DenoiserParams
+      bind:this={denoiserParamsRef}
+      onAnalyze={runDenoiserAnalyze}
+      onApply={runDenoiserApply}
+      onReset={runDenoiserReset}
+      onExport={runDenoiserExport}
+      onClearNoiseSelection={() => denoiserView?.clearSelection()}
+    />
   {:else if $activeTab === 'pitch'}
     <ParameterPanel
       onAnalyze={runAnalyze}
@@ -1046,6 +1131,14 @@
         bind:this={declickerView}
         {syncWaveform}
         {onSeek}
+      />
+    </div>
+    <div style:display={$activeTab === 'denoise' ? 'contents' : 'none'}>
+      <DenoiserView
+        bind:this={denoiserView}
+        {syncWaveform}
+        {onSeek}
+        onNoiseSelection={(start, end) => denoiserParamsRef?.setNoiseRange(start, end)}
       />
     </div>
     <div style:display={$activeTab === 'pitch' ? 'contents' : 'none'}>
@@ -1085,6 +1178,8 @@
   <div class="right-panel">
     {#if $activeTab === 'declicker'}
       <DeclickerInfoPanel onSeekTime={(t) => waveformPlayer?.seek(t)} />
+    {:else if $activeTab === 'denoise'}
+      <DenoiserInfoPanel />
     {:else if $activeTab === 'pitch'}
       <ClusterPanel {onClusterParamChange} onProcessSegment={processSegment} onEditComplete={autoProcessSegment} onSeekTime={(t) => waveformPlayer?.seek(t)} />
     {:else}

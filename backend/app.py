@@ -30,6 +30,10 @@ from declicker_engine import (
     get_default_declicker_params, detect_clicks, run_declicker, isolate_clicks,
 )
 
+from denoise_engine import (
+    get_default_denoise_params, apply_denoise, compute_spectrograms,
+)
+
 from audio_engine import (
     analyze_pitch, cluster_notes, parse_midi_file, piano_to_midi_notes, midi_notes_to_file,
     autocorrect_midi, autocorrect_standard,
@@ -76,6 +80,9 @@ SESSION = {
     'declicker_detections': None,
     'declicker_audio': None,
     'declicker_path': None,
+    'denoiser_params': {},
+    'denoiser_audio': None,
+    'denoiser_path': None,
 }
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'vocal_editor'
@@ -1370,6 +1377,123 @@ def declicker_reset():
     SESSION['declicker_detections'] = None
     SESSION['declicker_audio'] = None
     SESSION['declicker_path'] = None
+    return jsonify({'ok': True})
+
+
+##############################################################################
+# Denoiser endpoints
+##############################################################################
+
+def _get_denoiser_source_audio():
+    """Get audio to run denoiser on. Use declicked audio if available, else original."""
+    if SESSION.get('declicker_audio') is not None:
+        audio = SESSION['declicker_audio']
+    elif SESSION['audio'] is not None:
+        audio = SESSION['audio']
+    else:
+        return None, None
+    if len(audio.shape) > 1:
+        audio = get_audio_mono(audio)
+    return audio, SESSION['sr']
+
+
+def _extract_noise_clip(audio, sr, data):
+    """Extract noise clip from audio if noise_start/noise_end are provided."""
+    noise_start = data.get('noise_start')
+    noise_end = data.get('noise_end')
+    if noise_start is not None and noise_end is not None:
+        start_sample = int(float(noise_start) * sr)
+        end_sample = int(float(noise_end) * sr)
+        start_sample = max(0, min(start_sample, len(audio)))
+        end_sample = max(start_sample, min(end_sample, len(audio)))
+        if end_sample > start_sample:
+            return audio[start_sample:end_sample]
+    return None
+
+
+@app.route('/api/denoiser/analyze', methods=['POST'])
+def denoiser_analyze():
+    """Run denoise + compute spectrograms for visualization (doesn't save)."""
+    audio, sr = _get_denoiser_source_audio()
+    if audio is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+
+    data = request.get_json(silent=True) or {}
+    params = get_default_denoise_params()
+    params.update({k: v for k, v in data.items() if k in params})
+    SESSION['denoiser_params'] = params
+
+    try:
+        noise_clip = _extract_noise_clip(audio, sr, data)
+        denoised = apply_denoise(audio, sr, params, noise_clip=noise_clip)
+        spec_data = compute_spectrograms(audio, denoised, sr, params.get('n_fft', 1024))
+        return jsonify({'ok': True, **spec_data})
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+@app.route('/api/denoiser/apply', methods=['POST'])
+def denoiser_apply():
+    """Run denoise, save to disk, update SESSION."""
+    audio, sr = _get_denoiser_source_audio()
+    if audio is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+
+    data = request.get_json(silent=True) or {}
+    params = get_default_denoise_params()
+    params.update({k: v for k, v in data.items() if k in params})
+    SESSION['denoiser_params'] = params
+
+    try:
+        noise_clip = _extract_noise_clip(audio, sr, data)
+        print(f"[denoiser/apply] Running denoise on audio shape={audio.shape}, sr={sr}")
+        denoised = apply_denoise(audio, sr, params, noise_clip=noise_clip)
+        print(f"[denoiser/apply] Done, denoised shape={denoised.shape}")
+
+        path = UPLOAD_DIR / f"denoised_{uuid.uuid4().hex}.wav"
+        sf.write(str(path), denoised, int(sr))
+        SESSION['denoiser_audio'] = denoised
+        SESSION['denoiser_path'] = str(path)
+        print(f"[denoiser/apply] Saved to {path}")
+
+        spec_data = compute_spectrograms(audio, denoised, sr, params.get('n_fft', 1024))
+        return jsonify({'ok': True, **spec_data})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+@app.route('/api/denoiser/audio')
+def denoiser_audio():
+    """Serve the denoised audio for playback."""
+    if not SESSION['denoiser_path'] or not os.path.exists(SESSION['denoiser_path']):
+        return jsonify({'error': 'No denoised audio available'}), 404
+    return send_file(SESSION['denoiser_path'], mimetype='audio/wav')
+
+
+@app.route('/api/denoiser/export')
+def denoiser_export():
+    """Download the denoised audio file."""
+    if not SESSION['denoiser_path'] or not os.path.exists(SESSION['denoiser_path']):
+        return jsonify({'error': 'No denoised audio to export'}), 404
+
+    original_name = Path(SESSION['audio_path']).stem if SESSION['audio_path'] else 'audio'
+    return send_file(
+        SESSION['denoiser_path'],
+        mimetype='audio/wav',
+        as_attachment=True,
+        download_name=f"{original_name}_denoised.wav"
+    )
+
+
+@app.route('/api/denoiser/reset', methods=['POST'])
+def denoiser_reset():
+    """Clear all denoiser state."""
+    SESSION['denoiser_params'] = {}
+    SESSION['denoiser_audio'] = None
+    SESSION['denoiser_path'] = None
     return jsonify({'ok': True})
 
 

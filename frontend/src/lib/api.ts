@@ -1,4 +1,4 @@
-import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, TimeEdit, TimeStretchResult, StretchMarker, DeclickerResult, DeclickerParams } from '$lib/utils/types';
+import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, TimeEdit, TimeStretchResult, StretchMarker, DeclickerResult, DeclickerParams, DenoiserParams, DenoiserResult } from '$lib/utils/types';
 
 async function post(url: string, body?: object): Promise<any> {
   const opts: RequestInit = { method: 'POST' };
@@ -132,4 +132,25 @@ export function declickerAudioUrl(): string {
 
 export function declickerExportUrl(): string {
   return '/api/declicker/export';
+}
+
+// Denoiser API
+export async function denoiserAnalyze(params: DenoiserParams): Promise<DenoiserResult> {
+  return post('/api/denoiser/analyze', params);
+}
+
+export async function denoiserApply(params: DenoiserParams): Promise<DenoiserResult> {
+  return post('/api/denoiser/apply', params);
+}
+
+export async function denoiserReset(): Promise<{ ok: boolean }> {
+  return post('/api/denoiser/reset');
+}
+
+export function denoiserAudioUrl(): string {
+  return `/api/denoiser/audio?t=${Date.now()}`;
+}
+
+export function denoiserExportUrl(): string {
+  return '/api/denoiser/export';
 }

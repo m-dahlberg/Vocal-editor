@@ -6,3 +6,4 @@ praat-parselmouth
 mido
 sms-tools
 scipy
+noisereduce
