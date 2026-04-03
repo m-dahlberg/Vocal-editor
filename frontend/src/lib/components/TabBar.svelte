@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeTab, timeEdits, clusters, declickerApplied, denoiserApplied } from '$lib/stores/appState';
+  import { activeTab, timeEdits, clusters, declickerApplied, denoiserApplied, editApplied } from '$lib/stores/appState';
 
   const hasTimeEdits = $derived($timeEdits.length > 0);
   const hasPitchEdits = $derived($clusters.some(c => c.pitch_shift_semitones !== 0 || (c.smoothing_percent ?? 0) !== 0));
@@ -24,6 +24,16 @@
     Denoise
     {#if $denoiserApplied}
       <span class="badge" title="Denoise applied"></span>
+    {/if}
+  </button>
+  <button
+    class="tab-btn"
+    class:active={$activeTab === 'edit'}
+    onclick={() => $activeTab = 'edit'}
+  >
+    Fine Edit
+    {#if $editApplied}
+      <span class="badge" title="Edit applied"></span>
     {/if}
   </button>
   <button

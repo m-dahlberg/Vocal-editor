@@ -83,6 +83,9 @@ SESSION = {
     'denoiser_params': {},
     'denoiser_audio': None,
     'denoiser_path': None,
+    'edit_audio': None,
+    'edit_path': None,
+    'edit_clips': None,
 }
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'vocal_editor'
@@ -178,6 +181,9 @@ def upload_audio():
     SESSION['declicker_detections'] = None
     SESSION['declicker_audio'] = None
     SESSION['declicker_path'] = None
+    SESSION['edit_audio'] = None
+    SESSION['edit_path'] = None
+    SESSION['edit_clips'] = None
 
     return jsonify({'ok': True, 'filename': file.filename})
 
@@ -307,8 +313,9 @@ def analyze():
     SESSION['sms_analysis'] = None
 
     try:
+        audio_path = _get_pipeline_audio_path()
         times, frequencies, notes, sr, audio = analyze_pitch(
-            SESSION['audio_path'], SESSION['params']
+            audio_path, SESSION['params']
         )
 
         SESSION['times'] = times
@@ -1495,6 +1502,80 @@ def denoiser_reset():
     SESSION['denoiser_audio'] = None
     SESSION['denoiser_path'] = None
     return jsonify({'ok': True})
+
+
+##############################################################################
+# Audio source resolution helpers
+##############################################################################
+
+def _get_edit_source_audio_path():
+    """Get audio path for the edit tab input: denoiser -> declicker -> raw."""
+    if SESSION.get('denoiser_path') and os.path.exists(SESSION['denoiser_path']):
+        return SESSION['denoiser_path']
+    if SESSION.get('declicker_path') and os.path.exists(SESSION['declicker_path']):
+        return SESSION['declicker_path']
+    return SESSION.get('audio_path')
+
+
+def _get_pipeline_audio_path():
+    """Get best available audio for pitch/time processing: edit -> denoiser -> declicker -> raw."""
+    if SESSION.get('edit_path') and os.path.exists(SESSION['edit_path']):
+        return SESSION['edit_path']
+    return _get_edit_source_audio_path()
+
+
+##############################################################################
+# Fine Edit endpoints
+##############################################################################
+
+@app.route('/api/edit/upload_render', methods=['POST'])
+def edit_upload_render():
+    """Receive rendered edit audio and clip list from frontend."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    file = request.files['file']
+    path = UPLOAD_DIR / f"edit_{uuid.uuid4().hex}.wav"
+    save_as_wav(file, path)
+    data, sr = sf.read(str(path))
+    SESSION['edit_audio'] = data
+    SESSION['edit_path'] = str(path)
+    # Save clip list if provided
+    clips_json = request.form.get('clips')
+    if clips_json:
+        SESSION['edit_clips'] = json.loads(clips_json)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/edit/clips')
+def edit_get_clips():
+    """Return saved clip list for restoring edits."""
+    return jsonify({'ok': True, 'clips': SESSION.get('edit_clips')})
+
+
+@app.route('/api/edit/reset', methods=['POST'])
+def edit_reset():
+    """Clear all edit state."""
+    SESSION['edit_audio'] = None
+    SESSION['edit_path'] = None
+    SESSION['edit_clips'] = None
+    return jsonify({'ok': True})
+
+
+@app.route('/api/edit/audio')
+def edit_audio():
+    """Serve the committed edit output audio."""
+    if not SESSION.get('edit_path') or not os.path.exists(SESSION['edit_path']):
+        return jsonify({'error': 'No edit audio'}), 404
+    return send_file(SESSION['edit_path'], mimetype='audio/wav')
+
+
+@app.route('/api/edit/source_audio')
+def edit_source_audio():
+    """Serve the input audio for the edit tab (denoiser -> declicker -> raw)."""
+    path = _get_edit_source_audio_path()
+    if not path or not os.path.exists(path):
+        return jsonify({'error': 'No audio'}), 404
+    return send_file(path, mimetype='audio/wav')
 
 
 if __name__ == '__main__':

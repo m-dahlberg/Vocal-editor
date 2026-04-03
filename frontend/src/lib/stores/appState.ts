@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import type { Cluster, MidiNote, MidiWarning, LogMessage, TimeEdit, TimemapEntry, StretchMarker, DeclickerDetection } from '$lib/utils/types';
+import type { Cluster, MidiNote, MidiWarning, LogMessage, TimeEdit, TimemapEntry, StretchMarker, DeclickerDetection, EditClip } from '$lib/utils/types';
 
 // Audio/analysis state
 export const clusters = writable<Cluster[]>([]);
@@ -31,7 +31,7 @@ export const selectedIndices = writable<Set<number>>(new Set());
 export const dirtyClusters = writable<Set<number>>(new Set());
 
 // Tab state
-export const activeTab = writable<'declicker' | 'denoise' | 'pitch' | 'time'>('declicker');
+export const activeTab = writable<'declicker' | 'denoise' | 'edit' | 'pitch' | 'time'>('declicker');
 
 // Declicker state
 export const declickerDetections = writable<DeclickerDetection[]>([]);
@@ -47,6 +47,14 @@ export const denoiserSpectrogramBefore = writable<number[][] | null>(null);
 export const denoiserSpectrogramAfter = writable<number[][] | null>(null);
 export const denoiserFreqAxis = writable<number[] | null>(null);
 export const denoiserTimeAxis = writable<number[] | null>(null);
+
+// Fine Edit state
+export const editClips = writable<EditClip[]>([]);
+export const editSelectedClipIds = writable<Set<string>>(new Set());
+export const editAudioBuffer = writable<AudioBuffer | null>(null);
+export const editApplied = writable(false);
+export const editCursorTime = writable(0);
+export const editTimeSelection = writable<{ start: number; end: number } | null>(null);
 
 // Time alignment edits (legacy)
 export const timeEdits = writable<TimeEdit[]>([]);

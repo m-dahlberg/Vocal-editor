@@ -1,4 +1,4 @@
-import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, TimeEdit, TimeStretchResult, StretchMarker, DeclickerResult, DeclickerParams, DenoiserParams, DenoiserResult } from '$lib/utils/types';
+import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, TimeEdit, TimeStretchResult, StretchMarker, DeclickerResult, DeclickerParams, DenoiserParams, DenoiserResult, EditClip } from '$lib/utils/types';
 
 async function post(url: string, body?: object): Promise<any> {
   const opts: RequestInit = { method: 'POST' };
@@ -153,4 +153,30 @@ export function denoiserAudioUrl(): string {
 
 export function denoiserExportUrl(): string {
   return '/api/denoiser/export';
+}
+
+// Fine Edit API
+export async function editUploadRender(wavBlob: Blob, clips: EditClip[]): Promise<{ ok: boolean; error?: string }> {
+  const fd = new FormData();
+  fd.append('file', wavBlob, 'edit_render.wav');
+  fd.append('clips', JSON.stringify(clips));
+  const r = await fetch('/api/edit/upload_render', { method: 'POST', body: fd });
+  return r.json();
+}
+
+export async function editGetClips(): Promise<{ ok: boolean; clips: EditClip[] | null }> {
+  const r = await fetch('/api/edit/clips');
+  return r.json();
+}
+
+export async function editReset(): Promise<{ ok: boolean }> {
+  return post('/api/edit/reset');
+}
+
+export function editAudioUrl(): string {
+  return `/api/edit/audio?t=${Date.now()}`;
+}
+
+export function editSourceAudioUrl(): string {
+  return `/api/edit/source_audio?t=${Date.now()}`;
 }

@@ -255,3 +255,12 @@ export interface DenoiserResult {
   freq_axis?: number[];
   time_axis?: number[];
 }
+
+export interface EditClip {
+  id: string;
+  sourceOffset: number;  // seconds into source audio buffer
+  duration: number;       // seconds
+  position: number;       // seconds on timeline
+  fadeIn?: number;        // seconds from clip start
+  fadeOut?: number;       // seconds from clip end
+}

@@ -7,7 +7,8 @@
     midiNotes, avgPitchDeviation, audioUrl, dirtyClusters, log,
     referenceClusters, referenceLoaded, backingLoaded,
     waveformReset, selectedIdx, selectedIndices, timeEdits, dirtyTimeEdits, backendTimemap,
-    advancedView, stretchMarkers, dirtyStretchMarkers
+    advancedView, stretchMarkers, dirtyStretchMarkers,
+    editClips, editSelectedClipIds, editApplied, editCursorTime, editTimeSelection
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
 
@@ -48,6 +49,13 @@
       $avgPitchDeviation = null;
       $stretchMarkers = [];
       $dirtyStretchMarkers = false;
+
+      // Reset edit tab state for the new file
+      $editClips = [];
+      $editSelectedClipIds = new Set();
+      $editApplied = false;
+      $editCursorTime = 0;
+      $editTimeSelection = null;
 
       // Force waveform to fully redraw for the new file
       $waveformReset = $waveformReset + 1;

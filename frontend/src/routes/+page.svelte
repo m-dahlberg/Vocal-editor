@@ -17,6 +17,9 @@
   import DenoiserParams from '$lib/components/DenoiserParams.svelte';
   import DenoiserView from '$lib/components/DenoiserView.svelte';
   import DenoiserInfoPanel from '$lib/components/DenoiserInfoPanel.svelte';
+  import EditParams from '$lib/components/EditParams.svelte';
+  import EditView from '$lib/components/EditView.svelte';
+  import EditInfoPanel from '$lib/components/EditInfoPanel.svelte';
   import * as api from '$lib/api';
   import {
     clusters, times, frequencies, originalTimes, originalFrequencies,
@@ -26,12 +29,15 @@
     stretchMarkers, dirtyStretchMarkers,
     referenceClusters, referenceStretchMarkers,
     declickerDetections, declickerBandCenters, declickerBandPeaks, declickerApplied, selectedClickIdx,
-    denoiserApplied, denoiserSpectrogramBefore, denoiserSpectrogramAfter, denoiserFreqAxis, denoiserTimeAxis
+    denoiserApplied, denoiserSpectrogramBefore, denoiserSpectrogramAfter, denoiserFreqAxis, denoiserTimeAxis,
+    editClips, editSelectedClipIds, editAudioBuffer, editApplied, editCursorTime,
+    editTimeSelection, waveformReset
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
   import { get } from 'svelte/store';
   import type { Cluster, MidiWarning, StretchMarker, MidiNote } from '$lib/utils/types';
+  import { encodeWav } from '$lib/utils/wavEncoder';
 
   let pitchPlot: PitchPlot;
   let timeAlignmentView: TimeAlignmentView;
@@ -39,7 +45,12 @@
   let declickerParams: DeclickerParams;
   let denoiserView: DenoiserView;
   let denoiserParamsRef: DenoiserParams;
+  let editView: EditView;
   let waveformPlayer: WaveformPlayer;
+
+  // Edit tab settings
+  let editZoomPercent = $state(20);
+  let editNudgeMs = $state(50);
 
 
   // --- Pitch curve helpers ---
@@ -707,6 +718,105 @@
     window.location.href = api.denoiserExportUrl();
   }
 
+  // --- Fine Edit ---
+  async function runEditCommit() {
+    const buffer = get(editAudioBuffer);
+    const clips = get(editClips);
+    if (!buffer || clips.length === 0) {
+      log('No audio or clips to commit', 'warn');
+      return;
+    }
+
+    $processing = true;
+    log('Rendering edit arrangement...');
+
+    try {
+      const totalDuration = Math.max(...clips.map(c => c.position + c.duration));
+      const offlineCtx = new OfflineAudioContext(
+        1,
+        Math.ceil(totalDuration * buffer.sampleRate),
+        buffer.sampleRate
+      );
+
+      const crossfades = editView?.getCrossfades() ?? [];
+
+      for (const clip of clips) {
+        const source = offlineCtx.createBufferSource();
+        source.buffer = buffer;
+
+        const gainNode = offlineCtx.createGain();
+        gainNode.connect(offlineCtx.destination);
+        source.connect(gainNode);
+
+        const clipEnd = clip.position + clip.duration;
+
+        // Apply explicit fade-in
+        if (clip.fadeIn && clip.fadeIn > 0) {
+          gainNode.gain.setValueAtTime(0, clip.position);
+          gainNode.gain.linearRampToValueAtTime(1, clip.position + clip.fadeIn);
+        }
+
+        // Apply explicit fade-out
+        if (clip.fadeOut && clip.fadeOut > 0) {
+          const fadeOutStart = clipEnd - clip.fadeOut;
+          gainNode.gain.setValueAtTime(1, fadeOutStart);
+          gainNode.gain.linearRampToValueAtTime(0, clipEnd);
+        }
+
+        // Apply crossfades
+        for (const xf of crossfades) {
+          if (xf.clipA.id === clip.id) {
+            gainNode.gain.setValueAtTime(1, xf.startTime);
+            gainNode.gain.linearRampToValueAtTime(0, xf.endTime);
+          } else if (xf.clipB.id === clip.id) {
+            gainNode.gain.setValueAtTime(0, xf.startTime);
+            gainNode.gain.linearRampToValueAtTime(1, xf.endTime);
+          }
+        }
+
+        source.start(clip.position, clip.sourceOffset, clip.duration);
+      }
+
+      const rendered = await offlineCtx.startRendering();
+      const wavBlob = encodeWav(rendered);
+      const result = await api.editUploadRender(wavBlob, clips);
+
+      if (result.error) {
+        log(`Edit commit failed: ${result.error}`, 'error');
+        return;
+      }
+
+      $editApplied = true;
+      $audioUrl = api.editAudioUrl();
+      log('Edit committed successfully');
+    } catch (e: any) {
+      log(`Edit commit error: ${e}`, 'error');
+    } finally {
+      $processing = false;
+    }
+  }
+
+  async function runEditReset() {
+    try {
+      await api.editReset();
+      $editClips = [];
+      $editSelectedClipIds = new Set();
+      $editApplied = false;
+      $editCursorTime = 0;
+      $editTimeSelection = null;
+      $audioUrl = api.audioUrl();
+      // Reload the edit view's source audio and reinitialize clips
+      $waveformReset = $waveformReset + 1;
+      log('Edit reset');
+    } catch (e) {
+      log(`Edit reset error: ${e}`, 'error');
+    }
+  }
+
+  function editDeleteSelected() {
+    editView?.deleteSelectedClips();
+  }
+
   async function deleteSelectedCluster() {
     if ($selectedIdx === null) return;
 
@@ -1034,6 +1144,7 @@
   function onTimeUpdate(time: number) {
     declickerView?.setPlayheadTime(time);
     denoiserView?.setPlayheadTime(time);
+    editView?.setPlayheadTime(time);
     if ($activeTab === 'pitch') {
       pitchPlot?.updatePlayhead(time);
       timeAlignmentView?.setPlayheadTime(time);
@@ -1068,11 +1179,18 @@
   function onKeyDown(e: KeyboardEvent) {
     if (e.code === 'Space' && !isTextInput(e.target)) {
       e.preventDefault();
-      waveformPlayer?.togglePlay();
+      if ($activeTab === 'edit') {
+        editView?.togglePlay();
+      } else {
+        waveformPlayer?.togglePlay();
+      }
     }
 
     if ((e.key === 'Delete' || e.key === 'Backspace') && !isTextInput(e.target)) {
-      if ($selectedIdx !== null) {
+      if ($activeTab === 'edit') {
+        e.preventDefault();
+        editView?.deleteAtCursorOrSelection();
+      } else if ($selectedIdx !== null) {
         e.preventDefault();
         if ($activeTab === 'pitch') {
           deleteSelectedCluster();
@@ -1080,6 +1198,51 @@
           deleteTimeAlignmentClusters();
         }
       }
+    }
+
+    if ((e.key === 'b' || e.key === 'B') && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.splitAtCursorOrSelection();
+    }
+
+    if ((e.key === 'a' || e.key === 'A') && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.trimStartToCursor();
+    }
+
+    if ((e.key === 's' || e.key === 'S') && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.trimEndToCursor();
+    }
+
+    if ((e.key === 'd' || e.key === 'D') && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.setFadeInToCursor();
+    }
+
+    if ((e.key === 'g' || e.key === 'G') && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.setFadeOutToCursor();
+    }
+
+    if ((e.key === 't' || e.key === 'T') && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.zoomIn(editZoomPercent);
+    }
+
+    if ((e.key === 'r' || e.key === 'R') && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.zoomOut(editZoomPercent);
+    }
+
+    if (e.key === ',' && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.nudge(-1, editNudgeMs);
+    }
+
+    if (e.key === '.' && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.nudge(1, editNudgeMs);
     }
   }
 </script>
@@ -1107,6 +1270,14 @@
       onReset={runDenoiserReset}
       onExport={runDenoiserExport}
       onClearNoiseSelection={() => denoiserView?.clearSelection()}
+    />
+  {:else if $activeTab === 'edit'}
+    <EditParams
+      onCommit={runEditCommit}
+      onReset={runEditReset}
+      onDeleteSelected={editDeleteSelected}
+      bind:zoomPercent={editZoomPercent}
+      bind:nudgeMs={editNudgeMs}
     />
   {:else if $activeTab === 'pitch'}
     <ParameterPanel
@@ -1141,6 +1312,13 @@
         onNoiseSelection={(start, end) => denoiserParamsRef?.setNoiseRange(start, end)}
       />
     </div>
+    <div style:display={$activeTab === 'edit' ? 'contents' : 'none'}>
+      <EditView
+        bind:this={editView}
+        {syncWaveform}
+        {onSeek}
+      />
+    </div>
     <div style:display={$activeTab === 'pitch' ? 'contents' : 'none'}>
       <PitchPlot
         bind:this={pitchPlot}
@@ -1165,10 +1343,12 @@
       />
     </div>
 
+    <div style:display={$activeTab === 'edit' ? 'none' : 'contents'}>
     <WaveformPlayer
       bind:this={waveformPlayer}
       {onTimeUpdate}
     />
+    </div>
 
     {#if $advancedView}
     <LogPanel />
@@ -1180,6 +1360,8 @@
       <DeclickerInfoPanel onSeekTime={(t) => waveformPlayer?.seek(t)} />
     {:else if $activeTab === 'denoise'}
       <DenoiserInfoPanel />
+    {:else if $activeTab === 'edit'}
+      <EditInfoPanel onSeekTime={(t) => waveformPlayer?.seek(t)} />
     {:else if $activeTab === 'pitch'}
       <ClusterPanel {onClusterParamChange} onProcessSegment={processSegment} onEditComplete={autoProcessSegment} onSeekTime={(t) => waveformPlayer?.seek(t)} />
     {:else}
