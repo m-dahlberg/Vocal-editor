@@ -180,3 +180,13 @@ export function editAudioUrl(): string {
 export function editSourceAudioUrl(): string {
   return `/api/edit/source_audio?t=${Date.now()}`;
 }
+
+// Project save/load
+export async function saveProject(pipelineStatus: Record<string, string>): Promise<{ ok: boolean; error?: string }> {
+  return post('/api/save_project', { pipeline_status: pipelineStatus });
+}
+
+export async function checkProject(): Promise<{ found: boolean; project?: any }> {
+  const r = await fetch('/api/check_project');
+  return r.json();
+}

@@ -31,8 +31,10 @@
     declickerDetections, declickerBandCenters, declickerBandPeaks, declickerApplied, selectedClickIdx,
     denoiserApplied, denoiserSpectrogramBefore, denoiserSpectrogramAfter, denoiserFreqAxis, denoiserTimeAxis,
     editClips, editSelectedClipIds, editAudioBuffer, editApplied, editCursorTime,
-    editTimeSelection, waveformReset
+    editTimeSelection, waveformReset,
+    pipelineStatus, markStepDone, markStepIdle,
   } from '$lib/stores/appState';
+  import type { PipelineStep } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
   import { get } from 'svelte/store';
@@ -52,6 +54,143 @@
   let editZoomPercent = $state(20);
   let editNudgeMs = $state(50);
 
+  // --- Auto-save project state ---
+  function autoSaveProject() {
+    const ps = get(pipelineStatus);
+    api.saveProject(ps).catch(() => {}); // fire-and-forget
+  }
+
+  // --- Restore project from saved state ---
+  async function restoreProject(project: any) {
+    $processing = true;
+    log('Restoring previous edits...');
+
+    try {
+      const ps = project.pipeline_status || {};
+
+      // Step 1: Restore De-Click
+      if (ps.declicker === 'done' && project.declicker_params && Object.keys(project.declicker_params).length > 0) {
+        log('Restoring de-click...');
+        const result = await api.declickerApply(project.declicker_params);
+        if (result.ok) {
+          $declickerDetections = result.clicks || [];
+          $declickerApplied = true;
+          pipelineStatus.update(s => ({ ...s, declicker: 'done' }));
+          log(`De-click restored: ${result.click_count} clicks`);
+        }
+      }
+
+      // Step 2: Restore Denoise
+      if (ps.denoise === 'done' && project.denoiser_params && Object.keys(project.denoiser_params).length > 0) {
+        log('Restoring denoise...');
+        const result = await api.denoiserApply(project.denoiser_params);
+        if (result.ok) {
+          $denoiserSpectrogramBefore = result.spectrogram_before || null;
+          $denoiserSpectrogramAfter = result.spectrogram_after || null;
+          $denoiserFreqAxis = result.freq_axis || null;
+          $denoiserTimeAxis = result.time_axis || null;
+          $denoiserApplied = true;
+          pipelineStatus.update(s => ({ ...s, denoise: 'done' }));
+          log('Denoise restored');
+        }
+      }
+
+      // Step 3: Restore Fine Edit
+      if (ps.edit === 'done' && project.edit_clips && project.edit_clips.length > 0) {
+        log('Restoring edit arrangement...');
+        $editClips = project.edit_clips;
+
+        // Fetch source audio and re-render with saved clips
+        const response = await fetch(api.editSourceAudioUrl());
+        const arrayBuffer = await response.arrayBuffer();
+        const audioCtx = new AudioContext();
+        const newBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        audioCtx.close();
+
+        $editAudioBuffer = newBuffer;
+        const wavBlob = await renderEditClipsWithBuffer(newBuffer, project.edit_clips);
+        const result = await api.editUploadRender(wavBlob, project.edit_clips);
+        if (!result.error) {
+          $editApplied = true;
+          pipelineStatus.update(s => ({ ...s, edit: 'done' }));
+          log('Edit restored');
+        }
+      }
+
+      // Step 4: Restore Pitch+Time
+      if (ps.pitchtime === 'done' && project.clusters && project.clusters.length > 0) {
+        log('Restoring pitch/time corrections...');
+        // First analyze to set up backend state
+        const p = project.analysis_params || getAllParams();
+        const analysisResult = await api.analyze(p);
+        if (!analysisResult.error) {
+          // Transfer saved edits to fresh clusters
+          const restoredClusters = transferEdits(project.clusters, analysisResult.clusters);
+          $times = analysisResult.times;
+          $frequencies = analysisResult.frequencies;
+          $originalTimes = [...analysisResult.times];
+          $originalFrequencies = [...analysisResult.frequencies];
+          $midiNotes = analysisResult.midi_notes;
+
+          // Restore stretch markers
+          if (project.stretch_markers) {
+            $stretchMarkers = project.stretch_markers;
+          }
+
+          // Sync to apply corrections
+          const clusterUpdates = restoredClusters.map((c: Cluster, idx: number) => ({
+            idx,
+            start_time: c.start_time,
+            end_time: c.end_time,
+            note: c.note,
+            mean_freq: c.mean_freq,
+            pitch_shift_semitones: c.pitch_shift_semitones,
+            ramp_in_ms: c.ramp_in_ms,
+            ramp_out_ms: c.ramp_out_ms,
+            correction_strength: c.correction_strength,
+            smoothing_percent: c.smoothing_percent,
+            manually_edited: c.manually_edited || false,
+          }));
+          const syncResult = await api.syncClusters(
+            clusterUpdates,
+            project.time_edits || [],
+            undefined,
+            project.stretch_markers || []
+          );
+          if (!syncResult.error) {
+            $clusters = syncResult.clusters;
+            if (syncResult.timemap) {
+              $backendTimemap = syncResult.timemap;
+            }
+            $audioUrl = api.audioUrl();
+            refreshCorrectionCurve();
+            pipelineStatus.update(s => ({ ...s, pitchtime: 'done' }));
+            log('Pitch/time corrections restored');
+          }
+        }
+      } else {
+        // No pitch/time edits — just run initial analysis
+        const p = getAllParams();
+        const analysisResult = await api.analyze(p);
+        if (!analysisResult.error) {
+          $clusters = analysisResult.clusters;
+          $times = analysisResult.times;
+          $frequencies = analysisResult.frequencies;
+          $originalTimes = [...analysisResult.times];
+          $originalFrequencies = [...analysisResult.frequencies];
+          $midiNotes = analysisResult.midi_notes;
+          $audioUrl = api.audioUrl();
+        }
+      }
+
+      $waveformReset = $waveformReset + 1;
+      log('Project restored successfully');
+    } catch (e: any) {
+      log(`Restore error: ${e}`, 'error');
+    } finally {
+      $processing = false;
+    }
+  }
 
   // --- Pitch curve helpers ---
 
@@ -551,6 +690,8 @@
       $dirtyClusters = new Set();
       $dirtyTimeEdits = new Set();
       $dirtyStretchMarkers = false;
+      markStepDone('pitchtime');
+      autoSaveProject();
 
       log('Corrections applied');
     } catch (e: any) {
@@ -563,6 +704,208 @@
   function runExport() {
     log('Downloading corrected audio...');
     window.location.href = api.exportUrl();
+  }
+
+  // --- Update All (re-render stale pipeline steps) ---
+
+  function transferEdits(oldClusters: Cluster[], newClusters: Cluster[]): Cluster[] {
+    return newClusters.map(nc => {
+      let bestOverlap = 0;
+      let bestOld: Cluster | null = null;
+      for (const oc of oldClusters) {
+        const overlapStart = Math.max(nc.start_time, oc.start_time);
+        const overlapEnd = Math.min(nc.end_time, oc.end_time);
+        const overlap = Math.max(0, overlapEnd - overlapStart);
+        if (overlap > bestOverlap) {
+          bestOverlap = overlap;
+          bestOld = oc;
+        }
+      }
+      if (bestOld && bestOverlap > 0) {
+        return {
+          ...nc,
+          pitch_shift_semitones: bestOld.pitch_shift_semitones,
+          smoothing_percent: bestOld.smoothing_percent,
+          ramp_in_ms: bestOld.ramp_in_ms,
+          ramp_out_ms: bestOld.ramp_out_ms,
+          correction_strength: bestOld.correction_strength,
+          manually_edited: bestOld.manually_edited,
+        };
+      }
+      return nc;
+    });
+  }
+
+  async function renderEditClipsWithBuffer(buffer: AudioBuffer, clips: import('$lib/utils/types').EditClip[]): Promise<Blob> {
+    const totalDuration = Math.max(...clips.map(c => c.position + c.duration));
+    const offlineCtx = new OfflineAudioContext(
+      1,
+      Math.ceil(totalDuration * buffer.sampleRate),
+      buffer.sampleRate
+    );
+
+    for (const clip of clips) {
+      const source = offlineCtx.createBufferSource();
+      source.buffer = buffer;
+      const gainNode = offlineCtx.createGain();
+      gainNode.connect(offlineCtx.destination);
+      source.connect(gainNode);
+
+      if (clip.fadeIn && clip.fadeIn > 0) {
+        gainNode.gain.setValueAtTime(0, clip.position);
+        gainNode.gain.linearRampToValueAtTime(1, clip.position + clip.fadeIn);
+      }
+      if (clip.fadeOut && clip.fadeOut > 0) {
+        const fadeOutStart = clip.position + clip.duration - clip.fadeOut;
+        gainNode.gain.setValueAtTime(1, fadeOutStart);
+        gainNode.gain.linearRampToValueAtTime(0, clip.position + clip.duration);
+      }
+      source.start(clip.position, clip.sourceOffset, clip.duration);
+    }
+
+    const rendered = await offlineCtx.startRendering();
+    return encodeWav(rendered);
+  }
+
+  async function runUpdateAll() {
+    const ps = get(pipelineStatus);
+    $processing = true;
+    log('Updating all stale pipeline steps...');
+
+    try {
+      // Step 1: De-Click
+      if (ps.declicker === 'stale') {
+        log('Re-applying de-click...');
+        const p = declickerParams.getParams();
+        const result = await api.declickerApply(p);
+        if (!result.ok) {
+          log(`De-click update failed: ${result.error}`, 'error');
+          return;
+        }
+        $declickerDetections = result.clicks || [];
+        $declickerApplied = true;
+        pipelineStatus.update(s => ({ ...s, declicker: 'done' }));
+        log(`De-click updated: ${result.click_count} clicks`);
+      }
+
+      // Step 2: Denoise
+      if (ps.denoise === 'stale') {
+        log('Re-applying denoise...');
+        const p = denoiserParamsRef.getParams();
+        const result = await api.denoiserApply(p);
+        if (!result.ok) {
+          log(`Denoise update failed: ${result.error}`, 'error');
+          return;
+        }
+        $denoiserSpectrogramBefore = result.spectrogram_before || null;
+        $denoiserSpectrogramAfter = result.spectrogram_after || null;
+        $denoiserFreqAxis = result.freq_axis || null;
+        $denoiserTimeAxis = result.time_axis || null;
+        $denoiserApplied = true;
+        pipelineStatus.update(s => ({ ...s, denoise: 'done' }));
+        log('Denoise updated');
+      }
+
+      // Step 3: Fine Edit
+      if (ps.edit === 'stale') {
+        log('Re-rendering edit arrangement...');
+        const clips = get(editClips);
+        if (clips.length > 0) {
+          // Fetch new source audio and decode
+          const response = await fetch(api.editSourceAudioUrl());
+          const arrayBuffer = await response.arrayBuffer();
+          const audioCtx = new AudioContext();
+          const newBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+          audioCtx.close();
+
+          $editAudioBuffer = newBuffer;
+          const wavBlob = await renderEditClipsWithBuffer(newBuffer, clips);
+          const result = await api.editUploadRender(wavBlob, clips);
+          if (result.error) {
+            log(`Edit update failed: ${result.error}`, 'error');
+            return;
+          }
+          $editApplied = true;
+        }
+        pipelineStatus.update(s => ({ ...s, edit: 'done' }));
+        log('Edit updated');
+      }
+
+      // Step 4: Pitch+Time
+      if (ps.pitchtime === 'stale') {
+        log('Re-analyzing and re-applying pitch/time corrections...');
+        const oldClusters = get(clusters);
+        const oldMarkers = get(stretchMarkers);
+        const oldTimeEdits = get(timeEdits);
+
+        // Re-analyze
+        const p = getAllParams();
+        const analysisResult = await api.analyze(p);
+        if (analysisResult.error) {
+          log(`Pitch re-analysis failed: ${analysisResult.error}`, 'error');
+          return;
+        }
+
+        // Transfer old edits to new clusters
+        const newClusters = transferEdits(oldClusters, analysisResult.clusters);
+        $times = analysisResult.times;
+        $frequencies = analysisResult.frequencies;
+        $originalTimes = [...analysisResult.times];
+        $originalFrequencies = [...analysisResult.frequencies];
+        $midiNotes = analysisResult.midi_notes;
+
+        // Check if there were any actual edits to re-apply
+        const hasEdits = newClusters.some(c =>
+          c.pitch_shift_semitones !== 0 || (c.smoothing_percent ?? 0) !== 0
+        ) || oldMarkers.length > 0;
+
+        if (hasEdits) {
+          const clusterUpdates = newClusters.map((c, idx) => ({
+            idx,
+            start_time: c.start_time,
+            end_time: c.end_time,
+            note: c.note,
+            mean_freq: c.mean_freq,
+            pitch_shift_semitones: c.pitch_shift_semitones,
+            ramp_in_ms: c.ramp_in_ms,
+            ramp_out_ms: c.ramp_out_ms,
+            correction_strength: c.correction_strength,
+            smoothing_percent: c.smoothing_percent,
+            manually_edited: c.manually_edited || false,
+          }));
+          const syncResult = await api.syncClusters(clusterUpdates, oldTimeEdits, undefined, oldMarkers);
+          if (syncResult.error) {
+            log(`Pitch/time sync failed: ${syncResult.error}`, 'error');
+            return;
+          }
+          $clusters = syncResult.clusters;
+          if (syncResult.timemap) {
+            $backendTimemap = syncResult.timemap;
+          }
+          if (syncResult.corrected_times && syncResult.corrected_freqs) {
+            pitchPlot?.updatePitchSegment(syncResult.corrected_times, syncResult.corrected_freqs, -Infinity, Infinity);
+          }
+        } else {
+          $clusters = newClusters;
+        }
+
+        $audioUrl = api.audioUrl();
+        $dirtyClusters = new Set();
+        $dirtyTimeEdits = new Set();
+        $dirtyStretchMarkers = false;
+        refreshCorrectionCurve();
+        pipelineStatus.update(s => ({ ...s, pitchtime: 'done' }));
+        log('Pitch/time updated');
+      }
+
+      $audioUrl = api.audioUrl();
+      autoSaveProject();
+      log('All pipeline steps updated');
+    } catch (e: any) {
+      log(`Update all error: ${e}`, 'error');
+    } finally {
+      $processing = false;
+    }
   }
 
   // --- De-Clicker actions ---
@@ -602,6 +945,8 @@
         $declickerApplied = true;
         $selectedClickIdx = null;
         $audioUrl = api.declickerAudioUrl();
+        markStepDone('declicker');
+        autoSaveProject();
         log(`De-click applied: ${result.click_count} clicks repaired in ${result.num_passes_run} pass(es)`);
       } else {
         log(`Apply failed: ${result.error}`, 'error');
@@ -638,6 +983,7 @@
       $declickerApplied = false;
       $selectedClickIdx = null;
       $audioUrl = api.audioUrl();
+      markStepIdle('declicker');
       log('De-clicker reset');
     } catch (e) {
       log(`Reset error: ${e}`, 'error');
@@ -687,6 +1033,8 @@
         $denoiserTimeAxis = result.time_axis || null;
         $denoiserApplied = true;
         $audioUrl = api.denoiserAudioUrl();
+        markStepDone('denoise');
+        autoSaveProject();
         log('Denoise applied');
       } else {
         log(`Denoise failed: ${result.error}`, 'error');
@@ -707,6 +1055,7 @@
       $denoiserTimeAxis = null;
       $audioUrl = api.audioUrl();
       denoiserView?.clearSelection();
+      markStepIdle('denoise');
       log('Denoiser reset');
     } catch (e) {
       log(`Reset error: ${e}`, 'error');
@@ -788,6 +1137,8 @@
 
       $editApplied = true;
       $audioUrl = api.editAudioUrl();
+      markStepDone('edit');
+      autoSaveProject();
       log('Edit committed successfully');
     } catch (e: any) {
       log(`Edit commit error: ${e}`, 'error');
@@ -807,6 +1158,7 @@
       $audioUrl = api.audioUrl();
       // Reload the edit view's source audio and reinitialize clips
       $waveformReset = $waveformReset + 1;
+      markStepIdle('edit');
       log('Edit reset');
     } catch (e) {
       log(`Edit reset error: ${e}`, 'error');
@@ -1011,6 +1363,8 @@
         $backendTimemap = result.timemap;
       }
       refreshCorrectionCurve();
+      markStepDone('pitchtime');
+      autoSaveProject();
       log('All edits applied successfully');
     } catch (e: any) {
       log(`Error: ${e}`, 'error');
@@ -1249,7 +1603,7 @@
 
 <svelte:window onkeydowncapture={onKeyDown} />
 
-<Header />
+<Header onUpdateAll={runUpdateAll} onRestoreProject={restoreProject} />
 <HelpModal />
 
 <div class="main-layout">

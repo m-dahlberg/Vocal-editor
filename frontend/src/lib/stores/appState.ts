@@ -33,6 +33,50 @@ export const dirtyClusters = writable<Set<number>>(new Set());
 // Tab state
 export const activeTab = writable<'declicker' | 'denoise' | 'edit' | 'pitch' | 'time'>('declicker');
 
+// Pipeline state management
+export type PipelineStep = 'declicker' | 'denoise' | 'edit' | 'pitchtime';
+export type StepStatus = 'idle' | 'done' | 'stale';
+
+export const pipelineStatus = writable<Record<PipelineStep, StepStatus>>({
+  declicker: 'idle',
+  denoise: 'idle',
+  edit: 'idle',
+  pitchtime: 'idle',
+});
+
+export const hasStaleSteps = derived(pipelineStatus, ($ps) =>
+  Object.values($ps).some(s => s === 'stale')
+);
+
+const PIPELINE_ORDER: PipelineStep[] = ['declicker', 'denoise', 'edit', 'pitchtime'];
+
+export function markDownstreamStale(fromStep: PipelineStep) {
+  pipelineStatus.update(ps => {
+    const idx = PIPELINE_ORDER.indexOf(fromStep);
+    const updated = { ...ps };
+    for (let i = idx + 1; i < PIPELINE_ORDER.length; i++) {
+      if (updated[PIPELINE_ORDER[i]] === 'done') {
+        updated[PIPELINE_ORDER[i]] = 'stale';
+      }
+    }
+    return updated;
+  });
+}
+
+export function markStepDone(step: PipelineStep) {
+  pipelineStatus.update(ps => ({ ...ps, [step]: 'done' }));
+  markDownstreamStale(step);
+}
+
+export function markStepIdle(step: PipelineStep) {
+  pipelineStatus.update(ps => ({ ...ps, [step]: 'idle' }));
+  markDownstreamStale(step);
+}
+
+export function resetPipelineStatus() {
+  pipelineStatus.set({ declicker: 'idle', denoise: 'idle', edit: 'idle', pitchtime: 'idle' });
+}
+
 // Declicker state
 export const declickerDetections = writable<DeclickerDetection[]>([]);
 export const declickerBandCenters = writable<number[]>([]);

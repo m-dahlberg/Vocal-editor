@@ -11,6 +11,8 @@ import soundfile as sf
 from pathlib import Path
 import tempfile
 import json
+import hashlib
+from datetime import datetime
 import parselmouth
 from parselmouth.praat import call
 
@@ -60,6 +62,8 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
 # Session storage (single user)
 SESSION = {
     'audio_path': None,
+    'audio_hash': None,
+    'original_filename': None,
     'midi_path': None,
     'audio': None,
     'sr': None,
@@ -90,6 +94,9 @@ SESSION = {
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'vocal_editor'
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+PROJECT_DIR = Path(os.environ.get('VOCAL_EDITOR_PROJECTS', str(Path.home() / '.vocal_editor' / 'projects')))
+PROJECT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_default_params():
@@ -185,7 +192,17 @@ def upload_audio():
     SESSION['edit_path'] = None
     SESSION['edit_clips'] = None
 
-    return jsonify({'ok': True, 'filename': file.filename})
+    # Compute content hash for project save/load
+    audio_data, sr = sf.read(str(path))
+    audio_hash = hashlib.sha256(audio_data.tobytes()).hexdigest()
+    SESSION['audio_hash'] = audio_hash
+    SESSION['original_filename'] = file.filename
+
+    # Check if a saved project exists for this audio
+    project_path = PROJECT_DIR / f"{audio_hash}.json"
+    has_project = project_path.exists()
+
+    return jsonify({'ok': True, 'filename': file.filename, 'has_project': has_project})
 
 
 @app.route('/api/upload_reference', methods=['POST'])
@@ -1576,6 +1593,91 @@ def edit_source_audio():
     if not path or not os.path.exists(path):
         return jsonify({'error': 'No audio'}), 404
     return send_file(path, mimetype='audio/wav')
+
+
+##############################################################################
+# Project save/load endpoints
+##############################################################################
+
+def _serialize_clusters(clusters):
+    """Convert clusters to JSON-safe format."""
+    result = []
+    for c in clusters:
+        if isinstance(c, dict):
+            result.append(c)
+        else:
+            result.append({
+                'start_time': c.start_time,
+                'end_time': c.end_time,
+                'note': c.note,
+                'mean_freq': c.mean_freq,
+                'pitch_shift_semitones': getattr(c, 'pitch_shift_semitones', 0),
+                'ramp_in_ms': getattr(c, 'ramp_in_ms', 0),
+                'ramp_out_ms': getattr(c, 'ramp_out_ms', 0),
+                'correction_strength': getattr(c, 'correction_strength', 1.0),
+                'smoothing_percent': getattr(c, 'smoothing_percent', 0),
+                'manually_edited': getattr(c, 'manually_edited', False),
+                'frequencies': getattr(c, 'frequencies', []),
+                'times': getattr(c, 'times', []),
+            })
+    return result
+
+
+@app.route('/api/save_project', methods=['POST'])
+def save_project():
+    """Save current project state to a JSON file keyed by audio content hash."""
+    audio_hash = SESSION.get('audio_hash')
+    if not audio_hash:
+        return jsonify({'error': 'No audio loaded'}), 400
+
+    data = request.get_json(silent=True) or {}
+    pipeline_status = data.get('pipeline_status', {})
+
+    project = {
+        'audio_hash': audio_hash,
+        'original_filename': SESSION.get('original_filename', ''),
+        'saved_at': datetime.utcnow().isoformat(),
+        'pipeline_status': pipeline_status,
+        'declicker_params': SESSION.get('declicker_params', {}),
+        'denoiser_params': SESSION.get('denoiser_params', {}),
+        'analysis_params': SESSION.get('params', {}),
+        'clusters': _serialize_clusters(SESSION.get('clusters', [])),
+        'stretch_markers': SESSION.get('stretch_markers', []),
+        'time_edits': SESSION.get('time_edits', []),
+        'edit_clips': SESSION.get('edit_clips'),
+        'midi_notes': [
+            n if isinstance(n, dict) else {
+                'start': n.start, 'end': n.end,
+                'note': n.note, 'freq': n.freq, 'name': n.name,
+            }
+            for n in SESSION.get('midi_notes', [])
+        ] if SESSION.get('midi_notes') else [],
+    }
+
+    project_path = PROJECT_DIR / f"{audio_hash}.json"
+    with open(project_path, 'w') as f:
+        json.dump(project, f, indent=2)
+
+    return jsonify({'ok': True})
+
+
+@app.route('/api/check_project')
+def check_project():
+    """Check if a saved project exists for the currently loaded audio."""
+    audio_hash = SESSION.get('audio_hash')
+    if not audio_hash:
+        return jsonify({'found': False})
+
+    project_path = PROJECT_DIR / f"{audio_hash}.json"
+    if not project_path.exists():
+        return jsonify({'found': False})
+
+    try:
+        with open(project_path) as f:
+            project = json.load(f)
+        return jsonify({'found': True, 'project': project})
+    except Exception:
+        return jsonify({'found': False})
 
 
 if __name__ == '__main__':

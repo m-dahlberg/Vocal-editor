@@ -8,9 +8,18 @@
     referenceClusters, referenceLoaded, backingLoaded,
     waveformReset, selectedIdx, selectedIndices, timeEdits, dirtyTimeEdits, backendTimemap,
     advancedView, stretchMarkers, dirtyStretchMarkers,
-    editClips, editSelectedClipIds, editApplied, editCursorTime, editTimeSelection
+    editClips, editSelectedClipIds, editApplied, editCursorTime, editTimeSelection,
+    hasStaleSteps, resetPipelineStatus,
+    declickerApplied, declickerDetections, declickerBandCenters, declickerBandPeaks, selectedClickIdx,
+    denoiserApplied, denoiserSpectrogramBefore, denoiserSpectrogramAfter, denoiserFreqAxis, denoiserTimeAxis
   } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
+
+  interface Props {
+    onUpdateAll?: () => void;
+    onRestoreProject?: (project: any) => void;
+  }
+  let { onUpdateAll, onRestoreProject }: Props = $props();
 
   let audioFileInput: HTMLInputElement;
   let midiFileInput: HTMLInputElement;
@@ -57,12 +66,39 @@
       $editCursorTime = 0;
       $editTimeSelection = null;
 
+      // Reset declicker/denoiser state
+      $declickerApplied = false;
+      $declickerDetections = [];
+      $declickerBandCenters = [];
+      $declickerBandPeaks = [];
+      $selectedClickIdx = null;
+      $denoiserApplied = false;
+      $denoiserSpectrogramBefore = null;
+      $denoiserSpectrogramAfter = null;
+      $denoiserFreqAxis = null;
+      $denoiserTimeAxis = null;
+
+      // Reset pipeline status
+      resetPipelineStatus();
+
       // Force waveform to fully redraw for the new file
       $waveformReset = $waveformReset + 1;
 
       $audioLoaded = true;
       $fileStatus = `${file.name}`;
       log(`Audio uploaded: ${file.name}`);
+
+      // Check for saved project
+      if (result.has_project) {
+        const projectResult = await api.checkProject();
+        if (projectResult.found && projectResult.project) {
+          const restore = confirm('Previous edits found for this audio. Restore?');
+          if (restore) {
+            onRestoreProject?.(projectResult.project);
+            return;
+          }
+        }
+      }
 
       // Auto-analyze
       await runAnalyze();
@@ -252,6 +288,11 @@
         </span>
       </span>
     </label>
+    {#if $hasStaleSteps}
+      <button class="btn btn-update-all" onclick={() => onUpdateAll?.()} disabled={$processing}>
+        Update All
+      </button>
+    {/if}
     <button class="btn btn-secondary" onclick={() => $showHelp = true}>Help</button>
   </div>
 </header>
@@ -296,5 +337,28 @@
   .toggle-switch.active .toggle-thumb {
     transform: translateX(14px);
     background: var(--bg1);
+  }
+  .btn-update-all {
+    background: #f44336;
+    color: #fff;
+    border: none;
+    padding: 4px 14px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    animation: pulse-update 1.5s ease-in-out infinite;
+  }
+  .btn-update-all:hover {
+    background: #d32f2f;
+  }
+  .btn-update-all:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    animation: none;
+  }
+  @keyframes pulse-update {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
   }
 </style>
