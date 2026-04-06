@@ -30,7 +30,7 @@ def get_default_declicker_params():
 
 # ─── Frequency band decomposition ────────────────────────────────────────────
 
-def _build_frequency_bands(freq_low, freq_high, num_bands):
+def build_frequency_bands(freq_low, freq_high, num_bands):
     """Return N+1 log-spaced boundary frequencies defining N bands."""
     return np.geomspace(freq_low, freq_high, num_bands + 1).tolist()
 
@@ -218,7 +218,7 @@ def detect_clicks(audio, sr, params=None):
     step_size_s = step_samples / sr
 
     # Build frequency bands
-    boundaries = _build_frequency_bands(
+    boundaries = build_frequency_bands(
         params['freq_low'], params['freq_high'], params['num_bands']
     )
 
@@ -457,7 +457,7 @@ def run_declicker(audio, sr, params=None):
     current = audio.copy()
     all_pass_results = []
 
-    boundaries = _build_frequency_bands(
+    boundaries = build_frequency_bands(
         params['freq_low'], params['freq_high'], params['num_bands']
     )
 
@@ -478,3 +478,86 @@ def run_declicker(audio, sr, params=None):
 def isolate_clicks(original, repaired):
     """Return the difference (what was removed) — the isolated clicks."""
     return original - repaired
+
+
+def repair_clicks_segment(audio, sr, clicks, band_boundaries, params,
+                          padding_ms=100, crop_ms=50, crossfade_ms=10):
+    """
+    Repair one or more clicks by extracting a segment around them, repairing
+    within that segment, cropping artifact edges, and splicing back with crossfade.
+
+    Unlike repair_clicks() which modifies the full audio, this extracts only the
+    relevant region so successive calls accumulate correctly.
+    """
+    if not clicks:
+        return audio.copy()
+
+    padding_s = padding_ms / 1000.0
+    crop_s = crop_ms / 1000.0
+    crossfade_s = crossfade_ms / 1000.0
+    step_samples = max(1, int(round(sr * params['step_size_ms'] / 1000.0)))
+
+    # Determine segment boundaries spanning all clicks
+    seg_start_s = max(0.0, min(c['start_time'] for c in clicks) - padding_s)
+    seg_end_s = min(len(audio) / sr, max(c['end_time'] for c in clicks) + padding_s)
+
+    seg_start_sample = int(seg_start_s * sr)
+    seg_end_sample = int(seg_end_s * sr)
+
+    if seg_end_sample <= seg_start_sample:
+        return audio.copy()
+
+    segment = audio[seg_start_sample:seg_end_sample].copy()
+
+    # Adjust clicks to be relative to the segment start
+    seg_start_step = seg_start_sample // step_samples
+    adjusted_clicks = []
+    for c in clicks:
+        adj = dict(c)
+        adj['step_idx'] = max(0, c['step_idx'] - seg_start_step)
+        adj['start_time'] = max(0.0, c['start_time'] - seg_start_s)
+        adj['end_time'] = max(0.0, c['end_time'] - seg_start_s)
+        adjusted_clicks.append(adj)
+
+    repaired_seg = repair_clicks(segment, sr, adjusted_clicks, band_boundaries, params)
+
+    # Crop artifact edges
+    crop_samples = int(crop_s * sr)
+    crop_samples = min(crop_samples, (seg_end_sample - seg_start_sample) // 4)
+
+    # Splice boundaries after cropping
+    splice_start = seg_start_sample + crop_samples
+    splice_end = seg_end_sample - crop_samples
+    seg_content = repaired_seg[crop_samples: len(repaired_seg) - crop_samples]
+
+    if splice_end <= splice_start or len(seg_content) == 0:
+        return audio.copy()
+
+    result = audio.copy()
+    content_len = len(seg_content)
+    cf_samples = min(int(crossfade_s * sr), content_len // 2, splice_end - splice_start)
+
+    if cf_samples < 1:
+        result[splice_start:splice_end] = seg_content
+        return result
+
+    # Crossfade at start: old fades out, new fades in
+    fade_in = np.linspace(0.0, 1.0, cf_samples)
+    fade_out = np.linspace(1.0, 0.0, cf_samples)
+    result[splice_start:splice_start + cf_samples] = (
+        result[splice_start:splice_start + cf_samples] * fade_out
+        + seg_content[:cf_samples] * fade_in
+    )
+
+    # Direct replace in middle
+    result[splice_start + cf_samples:splice_end - cf_samples] = (
+        seg_content[cf_samples:content_len - cf_samples]
+    )
+
+    # Crossfade at end: new fades out, old fades in
+    result[splice_end - cf_samples:splice_end] = (
+        seg_content[content_len - cf_samples:] * fade_out
+        + result[splice_end - cf_samples:splice_end] * fade_in
+    )
+
+    return result

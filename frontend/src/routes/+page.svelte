@@ -29,6 +29,7 @@
     stretchMarkers, dirtyStretchMarkers,
     referenceClusters, referenceStretchMarkers,
     declickerDetections, declickerBandCenters, declickerBandPeaks, declickerApplied, selectedClickIdx,
+    declickerCheckedIndices, declickerProcessedClicks,
     denoiserApplied, denoiserSpectrogramBefore, denoiserSpectrogramAfter, denoiserFreqAxis, denoiserTimeAxis,
     editClips, editSelectedClipIds, editAudioBuffer, editApplied, editCursorTime,
     editTimeSelection, waveformReset,
@@ -78,6 +79,9 @@
           pipelineStatus.update(s => ({ ...s, declicker: 'done' }));
           log(`De-click restored: ${result.click_count} clicks`);
         }
+      }
+      if (project.declicker_processed_clicks) {
+        $declickerProcessedClicks = project.declicker_processed_clicks;
       }
 
       // Step 2: Restore Denoise
@@ -958,6 +962,30 @@
     $processing = false;
   }
 
+  async function runDeclickerApplySelected() {
+    const checked = get(declickerCheckedIndices);
+    if (!get(audioLoaded)) return;
+    $processing = true;
+    log(`Removing ${checked.size} selected clicks...`);
+    try {
+      const result = await api.declickerApplySelected([...checked]);
+      if (result.ok) {
+        $declickerProcessedClicks = result.processed_clicks || [];
+        // Keep checkedIndices as-is so applied clicks remain grey
+        $declickerApplied = true;
+        $audioUrl = api.declickerAudioUrl();
+        markStepDone('declicker');
+        autoSaveProject();
+        log(`Removed ${result.repaired_count} click(s)`);
+      } else {
+        log(`Apply selected failed: ${result.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Apply selected error: ${e}`, 'error');
+    }
+    $processing = false;
+  }
+
   async function runDeclickerPreview() {
     $processing = true;
     log('Generating click preview...');
@@ -982,6 +1010,8 @@
       $declickerBandPeaks = [];
       $declickerApplied = false;
       $selectedClickIdx = null;
+      $declickerCheckedIndices = new Set();
+      $declickerProcessedClicks = [];
       $audioUrl = api.audioUrl();
       markStepIdle('declicker');
       log('De-clicker reset');
@@ -993,6 +1023,34 @@
   function runDeclickerExport() {
     log('Downloading de-clicked audio...');
     window.location.href = api.declickerExportUrl();
+  }
+
+  async function handleDeclickerClicksChecked(clickIndices: number[], allChecked: boolean) {
+    if (!allChecked) return; // only process when adding clicks, not unchecking
+    const segParams = declickerParams?.getSegmentParams();
+    if (!segParams?.enabled) return;
+    $processing = true;
+    log(`Segment processing ${clickIndices.length} click(s)...`);
+    try {
+      const result = await api.declickerProcessSegment(
+        clickIndices,
+        segParams.padding_ms,
+        segParams.crop_ms,
+        segParams.crossfade_ms,
+      );
+      if (result.ok) {
+        $declickerApplied = true;
+        $audioUrl = api.declickerAudioUrl();
+        markStepDone('declicker');
+        await declickerView?.loadWaveform();
+        log(`Segment removed ${result.repaired_count} click(s)`);
+      } else {
+        log(`Segment processing failed: ${result.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Segment processing error: ${e}`, 'error');
+    }
+    $processing = false;
   }
 
   // --- Denoiser actions ---
@@ -1637,6 +1695,7 @@
       bind:this={declickerParams}
       onDetect={runDeclickerDetect}
       onApply={runDeclickerApply}
+      onApplySelected={runDeclickerApplySelected}
       onPreview={runDeclickerPreview}
       onReset={runDeclickerReset}
       onExport={runDeclickerExport}
@@ -1681,6 +1740,7 @@
         bind:this={declickerView}
         {syncWaveform}
         {onSeek}
+        onClicksChecked={handleDeclickerClicksChecked}
       />
     </div>
     <div style:display={$activeTab === 'denoise' ? 'contents' : 'none'}>

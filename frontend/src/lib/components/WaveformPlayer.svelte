@@ -236,6 +236,21 @@
     });
   });
 
+  // Sync waveform view to canvas zoom/pan range
+  $effect(() => {
+    const xRange = $viewXRange;
+    untrack(() => {
+      if (!peaks) return;
+      const visibleDuration = xRange[1] - xRange[0];
+      if (visibleDuration <= 0) return;
+      const view = peaks.views.getView('zoomview');
+      if (view) {
+        view.setZoom({ seconds: visibleDuration });
+        view.setStartTime(xRange[0]);
+      }
+    });
+  });
+
   // Volume sync effects
   $effect(() => {
     const vol = $mainVolume;

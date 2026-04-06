@@ -126,8 +126,30 @@ export async function declickerReset(): Promise<{ ok: boolean }> {
   return post('/api/declicker/reset');
 }
 
+export async function declickerApplySelected(clickIndices: number[]): Promise<{
+  ok: boolean; error?: string;
+  repaired_count?: number;
+  processed_clicks?: any[];
+}> {
+  return post('/api/declicker/apply_selected', { click_indices: clickIndices });
+}
+
 export function declickerAudioUrl(): string {
   return `/api/declicker/audio?t=${Date.now()}`;
+}
+
+export async function declickerProcessSegment(
+  clickIndices: number[],
+  paddingMs: number,
+  cropMs: number,
+  crossfadeMs: number,
+): Promise<{ ok: boolean; error?: string; repaired_count?: number }> {
+  return post('/api/declicker/process_segment', {
+    click_indices: clickIndices,
+    padding_ms: paddingMs,
+    crop_ms: cropMs,
+    crossfade_ms: crossfadeMs,
+  });
 }
 
 export function declickerExportUrl(): string {

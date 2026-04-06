@@ -1,16 +1,19 @@
 <script lang="ts">
-  import { declickerDetections, declickerApplied, audioLoaded } from '$lib/stores/appState';
+  import { declickerDetections, declickerApplied, audioLoaded, declickerCheckedIndices } from '$lib/stores/appState';
   import type { DeclickerParams as DeclickerParamsType } from '$lib/utils/types';
 
   interface Props {
     onDetect: () => void;
     onApply: () => void;
+    onApplySelected: () => void;
     onPreview: () => void;
     onReset: () => void;
     onExport: () => void;
   }
 
-  let { onDetect, onApply, onPreview, onReset, onExport }: Props = $props();
+  let { onDetect, onApply, onApplySelected, onPreview, onReset, onExport }: Props = $props();
+
+  const checkedCount = $derived($declickerCheckedIndices.size);
 
   // Local parameter state
   let numPasses = $state(2);
@@ -24,7 +27,22 @@
   let numBands = $state(12);
   let crossfadeMs = $state(5.0);
 
+  // Segment processing params
+  let segmentEnabled = $state(false);
+  let segmentPaddingMs = $state(100);
+  let segmentCropMs = $state(50);
+  let segmentCrossfadeMs = $state(10);
+
   const clickCount = $derived($declickerDetections.length);
+
+  export function getSegmentParams() {
+    return {
+      enabled: segmentEnabled,
+      padding_ms: segmentPaddingMs,
+      crop_ms: segmentCropMs,
+      crossfade_ms: segmentCrossfadeMs,
+    };
+  }
 
   export function getParams(): DeclickerParamsType {
     return {
@@ -90,6 +108,27 @@
   </section>
 
   <section>
+    <h3>Segment Processing</h3>
+    <div class="param-group">
+      <label class="checkbox-label">
+        <input type="checkbox" bind:checked={segmentEnabled}>
+        Auto-process on alt+click/drag
+      </label>
+      {#if segmentEnabled}
+        <label>Padding ({segmentPaddingMs} ms)
+          <input type="range" min="10" max="1000" step="10" bind:value={segmentPaddingMs}>
+        </label>
+        <label>Crop ({segmentCropMs} ms)
+          <input type="range" min="0" max="100" step="5" bind:value={segmentCropMs}>
+        </label>
+        <label>Crossfade ({segmentCrossfadeMs} ms)
+          <input type="range" min="1" max="100" step="1" bind:value={segmentCrossfadeMs}>
+        </label>
+      {/if}
+    </div>
+  </section>
+
+  <section>
     <div class="param-group">
       <div class="status-info">
         {#if clickCount > 0}
@@ -105,8 +144,11 @@
       <button class="btn-accent" disabled={!$audioLoaded} onclick={onDetect}>
         Detect Clicks
       </button>
-      <button class="btn-accent btn-apply" disabled={!$audioLoaded} onclick={onApply}>
-        Apply De-Click
+      <button class="btn-accent btn-apply" disabled={!$audioLoaded} onclick={onApplySelected}>
+        Apply De-Click{checkedCount > 0 ? ` (${checkedCount})` : ''}
+      </button>
+      <button class="btn btn-secondary btn-small" disabled={!$audioLoaded} onclick={onApply}>
+        Apply All
       </button>
       {#if $declickerApplied}
         <button class="btn btn-secondary btn-small" onclick={onPreview}>
@@ -172,5 +214,12 @@
     padding: 3px 8px;
     font-size: 0.72rem;
     margin-top: 4px;
+  }
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
   }
 </style>

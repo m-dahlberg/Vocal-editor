@@ -83,6 +83,32 @@ export const declickerBandCenters = writable<number[]>([]);
 export const declickerBandPeaks = writable<number[][]>([]);
 export const declickerApplied = writable(false);
 export const selectedClickIdx = writable<number | null>(null);
+export const declickerCheckedIndices = writable<Set<number>>(new Set());
+export const declickerProcessedClicks = writable<DeclickerDetection[]>([]);
+export const declickerFilterState = writable({
+  minRatioDb: 0,
+  minLengthMs: 0,
+  freqLowHz: 20,
+  freqHighHz: 20000,
+});
+export const declickerVisibleIndices = derived(
+  [declickerDetections, declickerFilterState, declickerBandCenters],
+  ([$dets, $filter, $bands]) => {
+    return $dets.reduce<number[]>((acc, click, i) => {
+      if (click.max_ratio_db < $filter.minRatioDb) return acc;
+      const ms = (click.end_time - click.start_time) * 1000;
+      if (ms < $filter.minLengthMs) return acc;
+      if ($bands.length > 0) {
+        const hasVisibleBand = click.bands.some(b =>
+          b < $bands.length && $bands[b] >= $filter.freqLowHz && $bands[b] <= $filter.freqHighHz
+        );
+        if (!hasVisibleBand) return acc;
+      }
+      acc.push(i);
+      return acc;
+    }, []);
+  }
+);
 
 // Denoiser state
 export const denoiserApplied = writable(false);

@@ -30,6 +30,7 @@ def save_as_wav(uploaded_file, wav_path):
 
 from declicker_engine import (
     get_default_declicker_params, detect_clicks, run_declicker, isolate_clicks,
+    repair_clicks, build_frequency_bands, repair_clicks_segment,
 )
 
 from denoise_engine import (
@@ -84,6 +85,7 @@ SESSION = {
     'declicker_detections': None,
     'declicker_audio': None,
     'declicker_path': None,
+    'declicker_processed_clicks': [],
     'denoiser_params': {},
     'denoiser_audio': None,
     'denoiser_path': None,
@@ -1345,6 +1347,108 @@ def declicker_apply():
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 
+@app.route('/api/declicker/apply_selected', methods=['POST'])
+def declicker_apply_selected():
+    """Repair only specific clicks (by index) without re-detecting."""
+    data = request.get_json(silent=True) or {}
+    click_indices = data.get('click_indices', [])
+
+    detections = SESSION.get('declicker_detections')
+    if not detections or not detections.get('clicks'):
+        return jsonify({'error': 'No detections available. Run detect first.'}), 400
+
+    all_clicks = detections['clicks']
+    selected = [all_clicks[i] for i in click_indices if i < len(all_clicks)]
+    if not selected:
+        return jsonify({'error': 'No valid clicks selected'}), 400
+
+    # Always apply from original audio so un-checking clicks takes effect
+    base, sr = _get_declicker_source_audio()
+    if base is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+
+    params = SESSION.get('declicker_params', get_default_declicker_params())
+    boundaries = build_frequency_bands(params['freq_low'], params['freq_high'], params['num_bands'])
+
+    try:
+        repaired = repair_clicks(base.copy(), sr, selected, boundaries, params)
+
+        path = UPLOAD_DIR / f"declicked_{uuid.uuid4().hex}.wav"
+        sf.write(str(path), repaired, int(sr))
+        SESSION['declicker_audio'] = repaired
+        SESSION['declicker_path'] = str(path)
+
+        # Replace processed clicks with current selection (not additive)
+        SESSION['declicker_processed_clicks'] = selected
+
+        return jsonify({
+            'ok': True,
+            'repaired_count': len(selected),
+            'processed_clicks': selected,
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+@app.route('/api/declicker/process_segment', methods=['POST'])
+def declicker_process_segment():
+    """Repair specific clicks as a single segment splice into current active audio."""
+    data = request.get_json(silent=True) or {}
+    click_indices = data.get('click_indices', [])
+    padding_ms = float(data.get('padding_ms', 100))
+    crop_ms = float(data.get('crop_ms', 50))
+    crossfade_ms = float(data.get('crossfade_ms', 10))
+
+    detections = SESSION.get('declicker_detections')
+    if not detections or not detections.get('clicks'):
+        return jsonify({'error': 'No detections available. Run detect first.'}), 400
+
+    all_clicks = detections['clicks']
+    selected = [all_clicks[i] for i in click_indices if i < len(all_clicks)]
+    if not selected:
+        return jsonify({'error': 'No valid clicks selected'}), 400
+
+    # Use current active audio so successive segment repairs accumulate
+    if SESSION.get('declicker_audio') is not None:
+        base = SESSION['declicker_audio']
+        sr = SESSION.get('declicker_sr')
+        if sr is None:
+            base, sr = _get_declicker_source_audio()
+    else:
+        base, sr = _get_declicker_source_audio()
+
+    if base is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+
+    params = SESSION.get('declicker_params', get_default_declicker_params())
+    boundaries = build_frequency_bands(params['freq_low'], params['freq_high'], params['num_bands'])
+
+    try:
+        repaired = repair_clicks_segment(
+            base.copy(), sr, selected, boundaries, params,
+            padding_ms=padding_ms, crop_ms=crop_ms, crossfade_ms=crossfade_ms
+        )
+
+        path = UPLOAD_DIR / f"declicked_{uuid.uuid4().hex}.wav"
+        sf.write(str(path), repaired, int(sr))
+        SESSION['declicker_audio'] = repaired
+        SESSION['declicker_sr'] = sr
+        SESSION['declicker_path'] = str(path)
+
+        # Append (accumulate) processed clicks
+        existing = SESSION.get('declicker_processed_clicks', [])
+        SESSION['declicker_processed_clicks'] = existing + selected
+
+        return jsonify({
+            'ok': True,
+            'repaired_count': len(selected),
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
 @app.route('/api/declicker/preview', methods=['POST'])
 def declicker_preview():
     """Generate isolated clicks audio (original - repaired) for preview."""
@@ -1401,6 +1505,7 @@ def declicker_reset():
     SESSION['declicker_detections'] = None
     SESSION['declicker_audio'] = None
     SESSION['declicker_path'] = None
+    SESSION['declicker_processed_clicks'] = []
     return jsonify({'ok': True})
 
 
@@ -1639,6 +1744,7 @@ def save_project():
         'saved_at': datetime.utcnow().isoformat(),
         'pipeline_status': pipeline_status,
         'declicker_params': SESSION.get('declicker_params', {}),
+        'declicker_processed_clicks': SESSION.get('declicker_processed_clicks', []),
         'denoiser_params': SESSION.get('denoiser_params', {}),
         'analysis_params': SESSION.get('params', {}),
         'clusters': _serialize_clusters(SESSION.get('clusters', [])),
