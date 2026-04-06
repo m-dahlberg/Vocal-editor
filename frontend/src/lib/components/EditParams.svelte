@@ -40,8 +40,13 @@
     <div class="shortcut-list">
       <div class="shortcut-row"><kbd>T</kbd> <span>Zoom in</span></div>
       <div class="shortcut-row"><kbd>R</kbd> <span>Zoom out</span></div>
+      <div class="shortcut-row"><kbd>Alt+A</kbd> <span>Zoom to fit</span></div>
       <div class="shortcut-row"><kbd>,</kbd> <span>Nudge left</span></div>
       <div class="shortcut-row"><kbd>.</kbd> <span>Nudge right</span></div>
+      <div class="shortcut-row"><kbd>Tab</kbd> <span>Next clip boundary</span></div>
+      <div class="shortcut-row"><kbd>Shift+Tab</kbd> <span>Prev clip boundary</span></div>
+      <div class="shortcut-row"><kbd>Enter</kbd> <span>Go to start</span></div>
+      <div class="shortcut-row"><kbd>Ctrl+Enter</kbd> <span>Go to end</span></div>
       <div class="shortcut-row"><kbd>B</kbd> <span>Split at cursor</span></div>
       <div class="shortcut-row"><kbd>A</kbd> <span>Trim start to cursor</span></div>
       <div class="shortcut-row"><kbd>S</kbd> <span>Trim end to cursor</span></div>

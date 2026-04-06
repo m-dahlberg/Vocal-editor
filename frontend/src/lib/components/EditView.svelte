@@ -785,37 +785,9 @@
     _didDrag = false;
   }
 
-  function constrainPosition(clip: EditClip, newPos: number, allClips: EditClip[]): number {
-    // Allow overlap up to 50% of the shorter clip — crossfade zone
-    let pos = Math.max(0, newPos);
-    const sorted = [...allClips].filter(c => c.id !== clip.id).sort((a, b) => a.position - b.position);
-
-    for (const other of sorted) {
-      const otherEnd = other.position + other.duration;
-      const clipEnd = pos + clip.duration;
-
-      if (pos < otherEnd && clipEnd > other.position) {
-        const overlapStart = Math.max(pos, other.position);
-        const overlapEnd = Math.min(clipEnd, otherEnd);
-        const overlap = overlapEnd - overlapStart;
-        const maxOverlap = Math.min(clip.duration, other.duration) * 0.5;
-
-        if (overlap > maxOverlap) {
-          // Determine which side the clip is coming from and snap to limit
-          if (pos < other.position) {
-            // Clip approaching from left — its right edge overlaps other's start
-            pos = other.position + other.duration - maxOverlap - clip.duration + other.duration;
-            // Simplified: cap overlap so clip.position + clip.duration = other.position + maxOverlap
-            pos = other.position + maxOverlap - clip.duration;
-            if (pos < 0) pos = 0;
-          } else {
-            // Clip approaching from right — its left edge overlaps other's end
-            pos = otherEnd - maxOverlap;
-          }
-        }
-      }
-    }
-    return pos;
+  function constrainPosition(clip: EditClip, newPos: number, _allClips: EditClip[]): number {
+    // Clips may fully overlap — no crossfade limit
+    return Math.max(0, newPos);
   }
 
   // Pan state
@@ -826,15 +798,27 @@
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     if (!canvasEl) return;
-    const rect = canvasEl.getBoundingClientRect();
-    const mx = (e.clientX - rect.left) / rect.width;
-    const span = _xRange[1] - _xRange[0];
-    const factor = e.deltaY > 0 ? 1.15 : 1 / 1.15;
-    const newSpan = Math.max(0.1, Math.min(span * factor, _fullXRange[1]));
-    const center = _xRange[0] + mx * span;
-    const newMin = Math.max(0, center - mx * newSpan);
-    const newMax = Math.min(_fullXRange[1], newMin + newSpan);
-    setXRange([newMin, newMax]);
+
+    if (e.shiftKey) {
+      // Shift+scroll → horizontal pan
+      const span = _xRange[1] - _xRange[0];
+      const delta = (e.deltaY !== 0 ? e.deltaY : e.deltaX) / canvasEl.getBoundingClientRect().width * span * 2;
+      const newMin = Math.max(0, _xRange[0] + delta);
+      const newMax = Math.min(_fullXRange[1], newMin + span);
+      setXRange([newMin, newMax]);
+    } else {
+      // Vertical scroll → zoom centred on mouse position
+      const rect = canvasEl.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) / rect.width;
+      const span = _xRange[1] - _xRange[0];
+      const factor = e.deltaY > 0 ? 1.15 : 1 / 1.15;
+      const newSpan = Math.max(0.1, Math.min(span * factor, _fullXRange[1]));
+      const center = _xRange[0] + mx * span;
+      const newMin = Math.max(0, center - mx * newSpan);
+      const newMax = Math.min(_fullXRange[1], newMin + newSpan);
+      setXRange([newMin, newMax]);
+    }
+
     requestDraw();
     syncWaveform(_xRange, _audioDuration);
   }
@@ -891,27 +875,30 @@
 
   // --- Clip operations ---
 
+  const SPLIT_FADE_S = 0.003; // 3 ms fade applied at every split/cut edge
+
   // Split a single clip at time t. Returns false if not possible.
   function splitClipAt(clips: EditClip[], t: number): EditClip[] | null {
     const clip = clips.find(c => t > c.position + 0.001 && t < c.position + c.duration - 0.001);
     if (!clip) return null;
 
     const relativeTime = t - clip.position;
+    const rightDuration = clip.duration - relativeTime;
     const left: EditClip = {
       id: crypto.randomUUID(),
       sourceOffset: clip.sourceOffset,
       duration: relativeTime,
       position: clip.position,
       fadeIn: clip.fadeIn ? Math.min(clip.fadeIn, relativeTime) : undefined,
-      fadeOut: undefined,
+      fadeOut: Math.min(SPLIT_FADE_S, relativeTime),
     };
     const right: EditClip = {
       id: crypto.randomUUID(),
       sourceOffset: clip.sourceOffset + relativeTime,
-      duration: clip.duration - relativeTime,
+      duration: rightDuration,
       position: clip.position + relativeTime,
-      fadeIn: undefined,
-      fadeOut: clip.fadeOut ? Math.min(clip.fadeOut, clip.duration - relativeTime) : undefined,
+      fadeIn: Math.min(SPLIT_FADE_S, rightDuration),
+      fadeOut: clip.fadeOut ? Math.min(clip.fadeOut, rightDuration) : undefined,
     };
     return [...clips.filter(c => c.id !== clip.id), left, right];
   }
@@ -1024,6 +1011,54 @@
 
     $editClips = $editClips.map(c => c.id === clip.id ? { ...c, fadeOut: (clip.position + clip.duration) - t } : c);
     requestDraw();
+  }
+
+  export function zoomToFull() {
+    setXRange([..._fullXRange] as [number, number]);
+    requestDraw();
+    syncWaveform(_xRange, _audioDuration);
+  }
+
+  export function moveToStart() {
+    $editCursorTime = 0;
+    onSeek?.(0);
+    requestDraw();
+  }
+
+  export function moveToEnd() {
+    $editCursorTime = _audioDuration;
+    onSeek?.(_audioDuration);
+    requestDraw();
+  }
+
+  export function moveToNextClipBoundary() {
+    const t = $editCursorTime;
+    const boundaries: number[] = [];
+    for (const c of $editClips) {
+      boundaries.push(c.position, c.position + c.duration);
+    }
+    boundaries.sort((a, b) => a - b);
+    const next = boundaries.find(b => b > t + 0.0001);
+    if (next !== undefined) {
+      $editCursorTime = next;
+      onSeek?.(next);
+      requestDraw();
+    }
+  }
+
+  export function moveToPrevClipBoundary() {
+    const t = $editCursorTime;
+    const boundaries: number[] = [];
+    for (const c of $editClips) {
+      boundaries.push(c.position, c.position + c.duration);
+    }
+    boundaries.sort((a, b) => b - a); // descending
+    const prev = boundaries.find(b => b < t - 0.0001);
+    if (prev !== undefined) {
+      $editCursorTime = prev;
+      onSeek?.(prev);
+      requestDraw();
+    }
   }
 
   // --- Playback engine ---

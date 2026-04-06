@@ -1559,9 +1559,14 @@
       editView?.splitAtCursorOrSelection();
     }
 
-    if ((e.key === 'a' || e.key === 'A') && !isTextInput(e.target) && $activeTab === 'edit') {
+    if ((e.key === 'a' || e.key === 'A') && !e.altKey && !isTextInput(e.target) && $activeTab === 'edit') {
       e.preventDefault();
       editView?.trimStartToCursor();
+    }
+
+    if ((e.key === 'a' || e.key === 'A') && e.altKey && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.zoomToFull();
     }
 
     if ((e.key === 's' || e.key === 'S') && !isTextInput(e.target) && $activeTab === 'edit') {
@@ -1597,6 +1602,26 @@
     if (e.key === '.' && !isTextInput(e.target) && $activeTab === 'edit') {
       e.preventDefault();
       editView?.nudge(1, editNudgeMs);
+    }
+
+    if (e.key === 'Tab' && !e.shiftKey && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.moveToNextClipBoundary();
+    }
+
+    if (e.key === 'Tab' && e.shiftKey && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.moveToPrevClipBoundary();
+    }
+
+    if (e.key === 'Enter' && !e.ctrlKey && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.moveToStart();
+    }
+
+    if (e.key === 'Enter' && e.ctrlKey && !isTextInput(e.target) && $activeTab === 'edit') {
+      e.preventDefault();
+      editView?.moveToEnd();
     }
   }
 </script>
