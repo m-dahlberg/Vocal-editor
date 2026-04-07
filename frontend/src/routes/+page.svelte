@@ -20,6 +20,9 @@
   import EditParams from '$lib/components/EditParams.svelte';
   import EditView from '$lib/components/EditView.svelte';
   import EditInfoPanel from '$lib/components/EditInfoPanel.svelte';
+  import VolumeParams from '$lib/components/VolumeParams.svelte';
+  import VolumeView from '$lib/components/VolumeView.svelte';
+  import VolumeInfoPanel from '$lib/components/VolumeInfoPanel.svelte';
   import * as api from '$lib/api';
   import {
     clusters, times, frequencies, originalTimes, originalFrequencies,
@@ -34,12 +37,13 @@
     editClips, editSelectedClipIds, editAudioBuffer, editApplied, editCursorTime,
     editTimeSelection, waveformReset,
     pipelineStatus, markStepDone, markStepIdle,
+    breaths, volumeClusters, selectedBreathIdx, dirtyVolume, volumeApplied, volumeMacroParams,
   } from '$lib/stores/appState';
   import type { PipelineStep } from '$lib/stores/appState';
   import { params, getAllParams } from '$lib/stores/params';
   import { computeShiftAtTime, generateCorrectionCurve, computePitchCurve, closestNote } from '$lib/utils/pitchMath';
   import { get } from 'svelte/store';
-  import type { Cluster, MidiWarning, StretchMarker, MidiNote } from '$lib/utils/types';
+  import type { Cluster, VolumeCluster, Breath, MidiWarning, StretchMarker, MidiNote, BreathDetectionParams, VolumeParams as VolumeAutomationParams } from '$lib/utils/types';
   import { encodeWav } from '$lib/utils/wavEncoder';
 
   let pitchPlot: PitchPlot;
@@ -50,6 +54,8 @@
   let denoiserParamsRef: DenoiserParams;
   let editView: EditView;
   let waveformPlayer: WaveformPlayer;
+  let volumeView: VolumeView;
+  let volumeParamsRef: VolumeParams;
 
   // Edit tab settings
   let editZoomPercent = $state(20);
@@ -58,7 +64,20 @@
   // --- Auto-save project state ---
   function autoSaveProject() {
     const ps = get(pipelineStatus);
-    api.saveProject(ps).catch(() => {}); // fire-and-forget
+    const mp = get(volumeMacroParams);
+    const volumeData = {
+      volume_clusters: get(volumeClusters),
+      breaths: get(breaths),
+      volume_params: {
+        note_min_rms_db: mp.note_min_rms_db,
+        note_max_rms_db: mp.note_max_rms_db,
+        note_global_offset_db: mp.note_global_offset_db,
+        breath_min_rms_db: mp.breath_min_rms_db,
+        breath_max_rms_db: mp.breath_max_rms_db,
+        breath_global_offset_db: mp.breath_global_offset_db,
+      },
+    };
+    api.saveProject(ps, volumeData).catch(() => {}); // fire-and-forget
   }
 
   // --- Restore project from saved state ---
@@ -1370,6 +1389,175 @@
     $selectedIndices = new Set();
   }
 
+  // --- Volume actions ---
+
+  async function runAnalyzeNotes() {
+    try {
+      const result = await api.volumeAnalyzeNotes();
+      if (result.ok) {
+        $volumeClusters = result.volume_clusters;
+        log(`Note RMS analyzed (${result.volume_clusters.length} notes)`);
+      } else {
+        log(`Note RMS analysis failed: ${result.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Note RMS analysis error: ${e}`, 'error');
+    }
+  }
+
+  function handleNoteRemove(id: number) {
+    $volumeClusters = $volumeClusters.filter(c => c.id !== id);
+    $dirtyVolume = true;
+    autoSaveProject();
+  }
+
+  async function handleSegmentAdd(type: 'note' | 'breath', startTime: number, endTime: number) {
+    try {
+      const result = await api.volumeComputeRms(startTime, endTime);
+      if (!result.ok) return;
+      if (type === 'note') {
+        const newId = ($volumeClusters.reduce((m, c) => Math.max(m, c.id), 0)) + 1;
+        $volumeClusters = [...$volumeClusters, {
+          id: newId, start_time: startTime, end_time: endTime,
+          rms_db: result.rms_db, gain_db: 0, manual: false,
+        }].sort((a, b) => a.start_time - b.start_time);
+      } else {
+        const newId = ($breaths.reduce((m, b) => Math.max(m, b.id), 0)) + 1;
+        $breaths = [...$breaths, {
+          id: newId, start_time: startTime, end_time: endTime,
+          duration_ms: Math.round((endTime - startTime) * 1000),
+          rms_db: result.rms_db, gain_db: 0, manually_created: true, manual: false,
+        }].sort((a, b) => a.start_time - b.start_time);
+      }
+      $dirtyVolume = true;
+      autoSaveProject();
+    } catch (e) {
+      log(`Add segment error: ${e}`, 'error');
+    }
+  }
+
+  async function handleSegmentResize(type: 'note' | 'breath', id: number, startTime: number, endTime: number) {
+    try {
+      const result = await api.volumeComputeRms(startTime, endTime);
+      if (!result.ok) return;
+      if (type === 'note') {
+        $volumeClusters = $volumeClusters.map(c =>
+          c.id === id ? { ...c, start_time: startTime, end_time: endTime, rms_db: result.rms_db } : c
+        );
+      } else {
+        $breaths = $breaths.map(b =>
+          b.id === id ? { ...b, start_time: startTime, end_time: endTime,
+            duration_ms: Math.round((endTime - startTime) * 1000), rms_db: result.rms_db } : b
+        );
+      }
+      $dirtyVolume = true;
+      autoSaveProject();
+    } catch (e) {
+      log(`Resize segment error: ${e}`, 'error');
+    }
+  }
+
+  async function runDetectBreaths(params: BreathDetectionParams): Promise<void> {
+    if (!get(audioLoaded)) return;
+    $processing = true;
+    log('Detecting breaths...');
+    try {
+      const result = await api.volumeDetectBreaths(params);
+      if (result.ok) {
+        $breaths = result.breaths;
+        // Update cluster rms_db from detection results
+        const rmsMap = new Map(result.cluster_rms.map(r => [r.id, r.rms_db]));
+        $clusters = $clusters.map(c => ({ ...c, rms_db: rmsMap.get(c.id ?? -1) ?? c.rms_db ?? -60 }));
+        log(`Detected ${result.breaths.length} breath(s)`);
+      } else {
+        log(`Breath detection failed: ${result.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Breath detection error: ${e}`, 'error');
+    }
+    $processing = false;
+  }
+
+  async function runApplyVolume(volumeParams: VolumeAutomationParams) {
+    if (!get(audioLoaded)) return;
+    $processing = true;
+    log('Applying volume automation...');
+    try {
+      const result = await api.volumeSyncVolume(get(breaths), get(volumeClusters), volumeParams);
+      if (result.ok) {
+        // Update volumeClusters rms_db from backend-computed values so display stays accurate
+        const rmsMap = new Map<number, number>(
+          ((result as any).cluster_rms ?? []).map((r: {id: number; rms_db: number}) => [r.id, r.rms_db])
+        );
+        if (rmsMap.size > 0) {
+          $volumeClusters = $volumeClusters.map(c => rmsMap.has(c.id) ? { ...c, rms_db: rmsMap.get(c.id)! } : c);
+        }
+        if ((result as any).message === 'No gain changes needed') {
+          log('No gain changes needed (all effective gains are 0)');
+        } else {
+          $volumeApplied = true;
+          $dirtyVolume = false;
+          $audioUrl = api.volumeAudioUrl();
+          markStepDone('volume');
+          autoSaveProject();
+          log('Volume automation applied');
+        }
+      } else {
+        log(`Volume apply failed: ${result.error}`, 'error');
+      }
+    } catch (e) {
+      log(`Volume apply error: ${e}`, 'error');
+    }
+    $processing = false;
+  }
+
+  async function runVolumeReset() {
+    try {
+      await api.volumeReset();
+      $breaths = [];
+      $volumeClusters = $volumeClusters.map(c => ({ ...c, gain_db: 0 }));
+      $selectedBreathIdx = null;
+      $volumeApplied = false;
+      $dirtyVolume = false;
+      $audioUrl = api.audioUrl();
+      markStepIdle('volume');
+      log('Volume reset');
+    } catch (e) {
+      log(`Volume reset error: ${e}`, 'error');
+    }
+  }
+
+  async function handleBreathClick(time: number) {
+    if (!get(audioLoaded)) return;
+    try {
+      const result = await api.volumeCreateBreath(time);
+      if (result.ok && result.breaths) {
+        $breaths = result.breaths;
+        log('Breath added');
+      } else {
+        log(result.error ?? 'Could not detect a breath at that location', 'warn');
+      }
+    } catch (e) {
+      log(`Error creating breath: ${e}`, 'error');
+    }
+  }
+
+  async function handleBreathAltClick(breathId: number) {
+    try {
+      const result = await api.volumeRemoveBreath(breathId);
+      if (result.ok) {
+        $breaths = result.breaths;
+        if ($selectedBreathIdx !== null && $selectedBreathIdx >= $breaths.length) {
+          $selectedBreathIdx = null;
+        }
+        log('Breath removed');
+        autoSaveProject();
+      }
+    } catch (e) {
+      log(`Error removing breath: ${e}`, 'error');
+    }
+  }
+
   // --- Time alignment callbacks ---
 
   async function applyTimeEdits() {
@@ -1557,6 +1745,7 @@
     declickerView?.setPlayheadTime(time);
     denoiserView?.setPlayheadTime(time);
     editView?.setPlayheadTime(time);
+    volumeView?.onTimeUpdate(time);
     if ($activeTab === 'pitch') {
       pitchPlot?.updatePlayhead(time);
       timeAlignmentView?.setPlayheadTime(time);
@@ -1723,13 +1912,21 @@
       onCorrect={runCorrect}
       onExport={runExport}
     />
-  {:else}
+  {:else if $activeTab === 'time'}
     <TimeAlignmentParams
       onAnalyze={runAnalyze}
       onApplyTimeEdits={applyTimeEdits}
       onExport={runExport}
       onResetMarkers={resetAllMarkers}
       onAutoTimeCorrect={autoTimeCorrect}
+    />
+  {:else}
+    <VolumeParams
+      bind:this={volumeParamsRef}
+      onDetectNotes={runAnalyzeNotes}
+      onDetectBreaths={runDetectBreaths}
+      onApplyVolume={runApplyVolume}
+      onReset={runVolumeReset}
     />
   {/if}
 
@@ -1781,6 +1978,18 @@
         onEditComplete={autoProcessTimeSegment}
       />
     </div>
+    <div style:display={$activeTab === 'volume' ? 'contents' : 'none'}>
+      <VolumeView
+        bind:this={volumeView}
+        {syncWaveform}
+        {onSeek}
+        onBreathClick={handleBreathClick}
+        onBreathAltClick={handleBreathAltClick}
+        onNoteRemove={handleNoteRemove}
+        onSegmentAdd={handleSegmentAdd}
+        onSegmentResize={handleSegmentResize}
+      />
+    </div>
 
     <div style:display={$activeTab === 'edit' ? 'none' : 'contents'}>
     <WaveformPlayer
@@ -1803,8 +2012,13 @@
       <EditInfoPanel onSeekTime={(t) => waveformPlayer?.seek(t)} />
     {:else if $activeTab === 'pitch'}
       <ClusterPanel {onClusterParamChange} onProcessSegment={processSegment} onEditComplete={autoProcessSegment} onSeekTime={(t) => waveformPlayer?.seek(t)} />
-    {:else}
+    {:else if $activeTab === 'time'}
       <TimeClusterPanel onProcessSegment={processSegment} />
+    {:else}
+      <VolumeInfoPanel
+        onSeekTime={(t) => waveformPlayer?.seek(t)}
+        onRemoveBreath={handleBreathAltClick}
+      />
     {/if}
     <MixerPanel />
   </div>

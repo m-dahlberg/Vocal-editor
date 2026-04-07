@@ -8,13 +8,14 @@
     edit: 'edit',
     pitch: 'pitchtime',
     time: 'pitchtime',
+    volume: 'volume',
   };
 
   function getStepStatus(tab: string): string {
     return $pipelineStatus[TAB_TO_STEP[tab]];
   }
 
-  function handleTabClick(tab: 'declicker' | 'denoise' | 'edit' | 'pitch' | 'time') {
+  function handleTabClick(tab: 'declicker' | 'denoise' | 'edit' | 'pitch' | 'time' | 'volume') {
     const status = getStepStatus(tab);
     if (status === 'stale') {
       log('Press Update All to refresh stale tabs', 'warn');
@@ -31,6 +32,7 @@
     { id: 'edit' as const, label: 'Fine Edit' },
     { id: 'pitch' as const, label: 'Pitch' },
     { id: 'time' as const, label: 'Time Alignment' },
+    { id: 'volume' as const, label: 'Volume' },
   ] as tab}
     {@const status = getStepStatus(tab.id)}
     <button

@@ -37,6 +37,11 @@ from denoise_engine import (
     get_default_denoise_params, apply_denoise, compute_spectrograms,
 )
 
+from volume_engine import (
+    compute_rms_db, detect_breaths, create_breath_at_point,
+    compute_effective_gains, generate_gain_envelope, apply_gain_envelope,
+)
+
 from audio_engine import (
     analyze_pitch, cluster_notes, parse_midi_file, piano_to_midi_notes, midi_notes_to_file,
     autocorrect_midi, autocorrect_standard,
@@ -92,6 +97,24 @@ SESSION = {
     'edit_audio': None,
     'edit_path': None,
     'edit_clips': None,
+    'breaths': [],
+    'volume_clusters': [],
+    'breath_params': {
+        'min_breath_length_ms': 80,
+        'min_breath_volume_db': -50,
+        'max_breath_volume_db': -15,
+    },
+    'volume_params': {
+        'note_min_rms_db': -60.0,
+        'note_max_rms_db': 0.0,
+        'note_global_offset_db': 0.0,
+        'breath_min_rms_db': -60.0,
+        'breath_max_rms_db': 0.0,
+        'breath_global_offset_db': 0.0,
+    },
+    'volume_audio': None,
+    'volume_path': None,
+    'volume_applied': False,
 }
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / 'vocal_editor'
@@ -526,6 +549,8 @@ def sync_clusters():
             'manually_edited':       bool(c.get('manually_edited', False)),
             'times':                 cluster_times,
             'frequencies':           cluster_freqs,
+            'rms_db':                float(c.get('rms_db', -60.0)),
+            'gain_db':               float(c.get('gain_db', 0.0)),
         }
         new_cluster['pitch_variation_cents'] = compute_cluster_pitch_variation(new_cluster)
         new_clusters.append(new_cluster)
@@ -1046,11 +1071,34 @@ def export_audio():
         except Exception as e:
             return jsonify({'error': f'Export processing failed: {e}'}), 500
 
+    # Apply volume automation if active
+    export_path = SESSION['corrected_path']
+    if SESSION.get('volume_applied') and SESSION.get('clusters'):
+        try:
+            corrected_audio, corr_sr = sf.read(SESSION['corrected_path'])
+            if corr_sr == SESSION['sr']:
+                audio_mono = get_audio_mono(corrected_audio)
+                clusters = SESSION['clusters']
+                breaths = SESSION.get('breaths', [])
+                volume_params = SESSION.get('volume_params', {})
+                for c in clusters:
+                    if 'rms_db' not in c:
+                        c['rms_db'] = compute_rms_db(audio_mono, SESSION['sr'], c['start_time'], c['end_time'])
+                effective_gains = compute_effective_gains(clusters, breaths, volume_params)
+                gain_env = generate_gain_envelope(clusters, breaths, effective_gains, SESSION['sr'], len(audio_mono))
+                processed = apply_gain_envelope(audio_mono, gain_env)
+                processed = np.clip(processed, -1.0, 1.0)
+                vol_export_path = str(UPLOAD_DIR / 'volume_export.wav')
+                sf.write(vol_export_path, processed, SESSION['sr'])
+                export_path = vol_export_path
+        except Exception as e:
+            pass  # Fall back to corrected audio
+
     original_name = Path(SESSION['audio_path']).stem if SESSION['audio_path'] else 'audio'
     download_name = f"{original_name}_corrected.wav"
 
     return send_file(
-        SESSION['corrected_path'],
+        export_path,
         mimetype='audio/wav',
         as_attachment=True,
         download_name=download_name
@@ -1728,6 +1776,245 @@ def _serialize_clusters(clusters):
     return result
 
 
+@app.route('/api/volume/analyze_notes', methods=['POST'])
+def volume_analyze_notes():
+    """Compute RMS for each note cluster from the corrected audio."""
+    if SESSION['audio'] is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+    if not SESSION['clusters']:
+        return jsonify({'error': 'No clusters found. Run analysis first.'}), 400
+
+    audio = SESSION.get('corrected_audio')
+    if audio is None:
+        audio = SESSION['audio']
+    sr = SESSION['sr']
+    clusters = SESSION['clusters']
+
+    volume_clusters = []
+    for c in clusters:
+        rms = compute_rms_db(audio, sr, c['start_time'], c['end_time'])
+        c['rms_db'] = round(rms, 2)
+        volume_clusters.append({
+            'id': c.get('id', 0),
+            'start_time': c['start_time'],
+            'end_time': c['end_time'],
+            'rms_db': c['rms_db'],
+            'gain_db': c.get('gain_db', 0.0),
+            'manual': False,
+        })
+
+    SESSION['volume_clusters'] = volume_clusters
+    SESSION['volume_applied'] = False
+    return jsonify({'ok': True, 'volume_clusters': volume_clusters})
+
+
+@app.route('/api/volume/compute_rms', methods=['POST'])
+def volume_compute_rms():
+    """Compute RMS dB for an arbitrary time range in the corrected audio."""
+    if SESSION['audio'] is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+    data = request.get_json(silent=True) or {}
+    start_time = data.get('start_time', 0.0)
+    end_time = data.get('end_time', 0.0)
+    audio = SESSION.get('corrected_audio')
+    if audio is None:
+        audio = SESSION['audio']
+    sr = SESSION['sr']
+    rms = compute_rms_db(audio, sr, start_time, end_time)
+    return jsonify({'ok': True, 'rms_db': round(rms, 2)})
+
+
+@app.route('/api/volume/detect_breaths', methods=['POST'])
+def volume_detect_breaths():
+    """Auto-detect breath regions in gaps between notes."""
+    if SESSION['audio'] is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+    if not SESSION['clusters']:
+        return jsonify({'error': 'No clusters found. Run analysis first.'}), 400
+
+    data = request.get_json(silent=True) or {}
+    bp = SESSION['breath_params'].copy()
+    bp.update({k: v for k, v in data.items() if k in bp})
+    # Include silence threshold from analysis params
+    bp['silence_threshold_db'] = SESSION.get('params', {}).get('silence_threshold_db', -55.0)
+    SESSION['breath_params'] = bp
+
+    audio = SESSION.get('corrected_audio')
+    if audio is None:
+        audio = SESSION['audio']
+    sr = SESSION['sr']
+    clusters = SESSION['clusters']
+    frequencies = SESSION.get('frequencies')
+    times = SESSION.get('times')
+
+    if frequencies is not None:
+        frequencies = np.array(frequencies, dtype=np.float64)
+    if times is not None:
+        times = np.array(times, dtype=np.float64)
+
+    # Compute per-cluster RMS while we have the audio
+    cluster_rms = []
+    for c in clusters:
+        rms = compute_rms_db(audio, sr, c['start_time'], c['end_time'])
+        c['rms_db'] = round(rms, 2)
+        cluster_rms.append({'id': c.get('id', 0), 'rms_db': c['rms_db']})
+
+    breaths = detect_breaths(audio, sr, clusters, frequencies, times, bp)
+    SESSION['breaths'] = breaths
+    SESSION['volume_applied'] = False
+
+    return jsonify({'ok': True, 'breaths': breaths, 'cluster_rms': cluster_rms})
+
+
+@app.route('/api/volume/create_breath', methods=['POST'])
+def volume_create_breath():
+    """Manually create a breath at a given click time."""
+    if SESSION['audio'] is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+
+    data = request.get_json(silent=True) or {}
+    click_time = data.get('click_time')
+    if click_time is None:
+        return jsonify({'error': 'click_time required'}), 400
+
+    audio = SESSION['audio']
+    sr = SESSION['sr']
+    clusters = SESSION.get('clusters', [])
+    frequencies = SESSION.get('frequencies')
+    times = SESSION.get('times')
+
+    if frequencies is not None:
+        frequencies = np.array(frequencies, dtype=np.float64)
+    if times is not None:
+        times = np.array(times, dtype=np.float64)
+
+    bp = SESSION['breath_params'].copy()
+    bp['silence_threshold_db'] = SESSION.get('params', {}).get('silence_threshold_db', -55.0)
+
+    breath = create_breath_at_point(audio, sr, click_time, clusters, frequencies, times, bp)
+    if breath is None:
+        return jsonify({'ok': False, 'error': 'Could not detect a valid breath at that location'})
+
+    # Assign a unique id
+    existing_ids = {b['id'] for b in SESSION['breaths']}
+    new_id = max(existing_ids, default=-1) + 1
+    breath['id'] = new_id
+    SESSION['breaths'].append(breath)
+    SESSION['volume_applied'] = False
+
+    return jsonify({'ok': True, 'breath': breath, 'breaths': SESSION['breaths']})
+
+
+@app.route('/api/volume/remove_breath', methods=['POST'])
+def volume_remove_breath():
+    """Remove a breath by id."""
+    data = request.get_json(silent=True) or {}
+    breath_id = data.get('breath_id')
+    if breath_id is None:
+        return jsonify({'error': 'breath_id required'}), 400
+
+    SESSION['breaths'] = [b for b in SESSION['breaths'] if b['id'] != breath_id]
+    SESSION['volume_applied'] = False
+
+    return jsonify({'ok': True, 'breaths': SESSION['breaths']})
+
+
+@app.route('/api/volume/sync_volume', methods=['POST'])
+def volume_sync_volume():
+    """Apply all volume automation: compute gain envelope and process audio."""
+    if SESSION['audio'] is None:
+        return jsonify({'error': 'No audio loaded'}), 400
+
+    data = request.get_json(silent=True) or {}
+
+    # Update session state from client
+    client_breaths = data.get('breaths', SESSION['breaths'])
+    SESSION['breaths'] = client_breaths
+
+    client_volume_params = data.get('volume_params', {})
+    if client_volume_params:
+        SESSION['volume_params'].update(client_volume_params)
+
+    # Sync volume clusters (includes custom boundaries, manual flag, gain_db)
+    client_volume_clusters = data.get('volume_clusters', [])
+    if client_volume_clusters:
+        SESSION['volume_clusters'] = client_volume_clusters
+
+    # Determine source audio (use corrected if available, else raw)
+    source_audio = SESSION.get('corrected_audio')
+    if source_audio is None:
+        source_audio = SESSION['audio']
+
+    sr = SESSION['sr']
+    volume_clusters = SESSION.get('volume_clusters') or []
+    breaths = SESSION['breaths']
+    volume_params = SESSION['volume_params']
+
+    # Recompute rms_db from source audio for all volume clusters
+    for vc in volume_clusters:
+        vc['rms_db'] = round(compute_rms_db(source_audio, sr, vc['start_time'], vc['end_time']), 2)
+
+    # Check if any gain changes are needed
+    effective_gains = compute_effective_gains(volume_clusters, breaths, volume_params)
+    all_zero = all(abs(g) < 0.001 for g in effective_gains.values())
+
+    if all_zero:
+        SESSION['volume_applied'] = False
+        cluster_rms = [{'id': vc.get('id', 0), 'rms_db': vc['rms_db']} for vc in volume_clusters]
+        return jsonify({'ok': True, 'message': 'No gain changes needed', 'cluster_rms': cluster_rms})
+
+    audio_length = len(source_audio)
+    gain_env = generate_gain_envelope(volume_clusters, breaths, effective_gains, sr, audio_length)
+    processed = apply_gain_envelope(source_audio, gain_env)
+
+    # Clamp to [-1, 1]
+    processed = np.clip(processed, -1.0, 1.0)
+
+    # Save to temp file
+    volume_path = str(UPLOAD_DIR / 'volume_output.wav')
+    sf.write(volume_path, processed, int(sr))
+
+    SESSION['volume_audio'] = processed
+    SESSION['volume_path'] = volume_path
+    SESSION['volume_applied'] = True
+
+    cluster_rms = [{'id': vc.get('id', 0), 'rms_db': vc['rms_db']} for vc in volume_clusters]
+    return jsonify({'ok': True, 'cluster_rms': cluster_rms})
+
+
+@app.route('/api/volume/audio')
+def volume_audio():
+    """Serve the volume-processed audio."""
+    path = SESSION.get('volume_path')
+    if not path or not os.path.exists(path):
+        # Fall back to corrected audio
+        path = SESSION.get('corrected_path')
+    if not path or not os.path.exists(path):
+        return jsonify({'error': 'No audio available'}), 404
+    return send_file(path, mimetype='audio/wav')
+
+
+@app.route('/api/volume/reset', methods=['POST'])
+def volume_reset():
+    """Reset all volume automation."""
+    SESSION['breaths'] = []
+    SESSION['volume_clusters'] = []
+    SESSION['volume_audio'] = None
+    SESSION['volume_path'] = None
+    SESSION['volume_applied'] = False
+    SESSION['volume_params'] = {
+        'note_min_rms_db': -60.0,
+        'note_max_rms_db': 0.0,
+        'note_global_offset_db': 0.0,
+        'breath_min_rms_db': -60.0,
+        'breath_max_rms_db': 0.0,
+        'breath_global_offset_db': 0.0,
+    }
+    for c in SESSION.get('clusters', []):
+        c['gain_db'] = 0.0
+    return jsonify({'ok': True})
+
+
 @app.route('/api/save_project', methods=['POST'])
 def save_project():
     """Save current project state to a JSON file keyed by audio content hash."""
@@ -1737,6 +2024,14 @@ def save_project():
 
     data = request.get_json(silent=True) or {}
     pipeline_status = data.get('pipeline_status', {})
+
+    # Accept volume data from frontend (it owns the canonical state)
+    if 'volume_clusters' in data:
+        SESSION['volume_clusters'] = data['volume_clusters']
+    if 'breaths' in data:
+        SESSION['breaths'] = data['breaths']
+    if 'volume_params' in data:
+        SESSION['volume_params'].update(data['volume_params'])
 
     project = {
         'audio_hash': audio_hash,
@@ -1751,6 +2046,9 @@ def save_project():
         'stretch_markers': SESSION.get('stretch_markers', []),
         'time_edits': SESSION.get('time_edits', []),
         'edit_clips': SESSION.get('edit_clips'),
+        'breaths': SESSION.get('breaths', []),
+        'volume_clusters': SESSION.get('volume_clusters', []),
+        'volume_params': SESSION.get('volume_params', {}),
         'midi_notes': [
             n if isinstance(n, dict) else {
                 'start': n.start, 'end': n.end,

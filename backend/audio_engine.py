@@ -426,6 +426,9 @@ def cluster_notes(times, frequencies, notes, audio, sr, params):
             c["smoothing_percent"] = DEFAULT_SMOOTHING_PERCENT
             c["manually_edited"] = False
             c["pitch_variation_cents"] = compute_cluster_pitch_variation(c)
+            c["gain_db"] = 0.0
+            # rms_db computed lazily (requires audio array, not available here)
+            c["rms_db"] = -60.0
             result.append(c)
 
     return result
@@ -1791,6 +1794,8 @@ def clusters_to_json(clusters):
                 "smoothing_percent": c["smoothing_percent"],
                 "pitch_variation_cents": c.get("pitch_variation_cents", 0),
                 "manually_edited": c.get("manually_edited", False),
+                "rms_db": c.get("rms_db", -60.0),
+                "gain_db": c.get("gain_db", 0.0),
             }
         )
     return result

@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import type { Cluster, MidiNote, MidiWarning, LogMessage, TimeEdit, TimemapEntry, StretchMarker, DeclickerDetection, EditClip } from '$lib/utils/types';
+import type { Cluster, Breath, VolumeCluster, MidiNote, MidiWarning, LogMessage, TimeEdit, TimemapEntry, StretchMarker, DeclickerDetection, EditClip } from '$lib/utils/types';
 
 // Audio/analysis state
 export const clusters = writable<Cluster[]>([]);
@@ -31,10 +31,10 @@ export const selectedIndices = writable<Set<number>>(new Set());
 export const dirtyClusters = writable<Set<number>>(new Set());
 
 // Tab state
-export const activeTab = writable<'declicker' | 'denoise' | 'edit' | 'pitch' | 'time'>('declicker');
+export const activeTab = writable<'declicker' | 'denoise' | 'edit' | 'pitch' | 'time' | 'volume'>('declicker');
 
 // Pipeline state management
-export type PipelineStep = 'declicker' | 'denoise' | 'edit' | 'pitchtime';
+export type PipelineStep = 'declicker' | 'denoise' | 'edit' | 'pitchtime' | 'volume';
 export type StepStatus = 'idle' | 'done' | 'stale';
 
 export const pipelineStatus = writable<Record<PipelineStep, StepStatus>>({
@@ -42,13 +42,14 @@ export const pipelineStatus = writable<Record<PipelineStep, StepStatus>>({
   denoise: 'idle',
   edit: 'idle',
   pitchtime: 'idle',
+  volume: 'idle',
 });
 
 export const hasStaleSteps = derived(pipelineStatus, ($ps) =>
   Object.values($ps).some(s => s === 'stale')
 );
 
-const PIPELINE_ORDER: PipelineStep[] = ['declicker', 'denoise', 'edit', 'pitchtime'];
+const PIPELINE_ORDER: PipelineStep[] = ['declicker', 'denoise', 'edit', 'pitchtime', 'volume'];
 
 export function markDownstreamStale(fromStep: PipelineStep) {
   pipelineStatus.update(ps => {
@@ -74,7 +75,7 @@ export function markStepIdle(step: PipelineStep) {
 }
 
 export function resetPipelineStatus() {
-  pipelineStatus.set({ declicker: 'idle', denoise: 'idle', edit: 'idle', pitchtime: 'idle' });
+  pipelineStatus.set({ declicker: 'idle', denoise: 'idle', edit: 'idle', pitchtime: 'idle', volume: 'idle' });
 }
 
 // Declicker state
@@ -165,6 +166,21 @@ export function log(msg: string, type: LogMessage['type'] = 'info') {
   const ts = new Date().toLocaleTimeString('en', { hour12: false });
   logMessages.update(msgs => [...msgs, { text: msg, type, timestamp: ts }]);
 }
+
+// Volume automation state
+export const breaths = writable<Breath[]>([]);
+export const volumeClusters = writable<VolumeCluster[]>([]);
+export const selectedBreathIdx = writable<number | null>(null);
+export const dirtyVolume = writable(false);
+export const volumeApplied = writable(false);
+export const volumeMacroParams = writable({
+  note_min_rms_db: -60,
+  note_max_rms_db: 0,
+  note_global_offset_db: 0,
+  breath_min_rms_db: -60,
+  breath_max_rms_db: 0,
+  breath_global_offset_db: 0,
+});
 
 // Derived: selected cluster object
 export const selectedCluster = derived(

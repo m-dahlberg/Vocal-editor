@@ -14,6 +14,43 @@ export interface Cluster {
   pitch_variation_cents?: number;
   times?: number[];
   frequencies?: number[];
+  rms_db?: number;
+  gain_db?: number;
+}
+
+export interface Breath {
+  id: number;
+  start_time: number;
+  end_time: number;
+  duration_ms: number;
+  rms_db: number;
+  gain_db: number;
+  manually_created: boolean;
+  manual?: boolean;
+}
+
+export interface VolumeCluster {
+  id: number;
+  start_time: number;
+  end_time: number;
+  rms_db: number;
+  gain_db: number;
+  manual?: boolean;
+}
+
+export interface VolumeParams {
+  note_min_rms_db: number;
+  note_max_rms_db: number;
+  note_global_offset_db: number;
+  breath_min_rms_db: number;
+  breath_max_rms_db: number;
+  breath_global_offset_db: number;
+}
+
+export interface BreathDetectionParams {
+  min_breath_length_ms: number;
+  min_breath_volume_db: number;
+  max_breath_volume_db: number;
 }
 
 export interface MidiNote {

@@ -1,4 +1,4 @@
-import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, TimeEdit, TimeStretchResult, StretchMarker, DeclickerResult, DeclickerParams, DenoiserParams, DenoiserResult, EditClip } from '$lib/utils/types';
+import type { AnalysisResult, CorrectResult, SyncResult, SegmentResult, UploadResult, Params, Cluster, Breath, VolumeCluster, VolumeParams, BreathDetectionParams, TimeEdit, TimeStretchResult, StretchMarker, DeclickerResult, DeclickerParams, DenoiserParams, DenoiserResult, EditClip } from '$lib/utils/types';
 
 async function post(url: string, body?: object): Promise<any> {
   const opts: RequestInit = { method: 'POST' };
@@ -204,11 +204,51 @@ export function editSourceAudioUrl(): string {
 }
 
 // Project save/load
-export async function saveProject(pipelineStatus: Record<string, string>): Promise<{ ok: boolean; error?: string }> {
-  return post('/api/save_project', { pipeline_status: pipelineStatus });
+export async function saveProject(
+  pipelineStatus: Record<string, string>,
+  volumeData?: { volume_clusters: VolumeCluster[]; breaths: Breath[]; volume_params: VolumeParams }
+): Promise<{ ok: boolean; error?: string }> {
+  return post('/api/save_project', { pipeline_status: pipelineStatus, ...volumeData });
 }
 
 export async function checkProject(): Promise<{ found: boolean; project?: any }> {
   const r = await fetch('/api/check_project');
   return r.json();
+}
+
+// Volume API
+export async function volumeAnalyzeNotes(): Promise<{ ok: boolean; error?: string; volume_clusters: VolumeCluster[] }> {
+  return post('/api/volume/analyze_notes', {});
+}
+
+export async function volumeComputeRms(startTime: number, endTime: number): Promise<{ ok: boolean; error?: string; rms_db: number }> {
+  return post('/api/volume/compute_rms', { start_time: startTime, end_time: endTime });
+}
+
+export async function volumeDetectBreaths(params: BreathDetectionParams): Promise<{ ok: boolean; error?: string; breaths: Breath[]; cluster_rms: { id: number; rms_db: number }[] }> {
+  return post('/api/volume/detect_breaths', params);
+}
+
+export async function volumeCreateBreath(clickTime: number): Promise<{ ok: boolean; error?: string; breath?: Breath; breaths?: Breath[] }> {
+  return post('/api/volume/create_breath', { click_time: clickTime });
+}
+
+export async function volumeRemoveBreath(breathId: number): Promise<{ ok: boolean; error?: string; breaths: Breath[] }> {
+  return post('/api/volume/remove_breath', { breath_id: breathId });
+}
+
+export async function volumeSyncVolume(
+  breaths: Breath[],
+  volumeClusters: VolumeCluster[],
+  volumeParams: VolumeParams
+): Promise<{ ok: boolean; error?: string; message?: string }> {
+  return post('/api/volume/sync_volume', { breaths, volume_clusters: volumeClusters, volume_params: volumeParams });
+}
+
+export async function volumeReset(): Promise<{ ok: boolean }> {
+  return post('/api/volume/reset');
+}
+
+export function volumeAudioUrl(): string {
+  return `/api/volume/audio?t=${Date.now()}`;
 }
